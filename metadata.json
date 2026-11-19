@@ -1,0 +1,6 @@
+{
+  "name": "PageBreaker",
+  "description": "A 2.5D physics-driven action parkour game where any live website awakens into combat scaled by its CSS and HTML craftsmanship.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -21,6 +21,7 @@ import { CameraRig } from './CameraRig';
 import { SHOWCASE_SITES } from '../data/showcaseSites';
 import { analyzeWebsiteHtml } from '../world/DomAnalyzer';
 import { WebsiteWorld } from '../world/WebsiteWorld';
+import { CosmicSky } from '../world/CosmicSky';
 
 interface PooledPointLight {
   light: THREE.PointLight;
@@ -78,6 +79,7 @@ export class RendererShell {
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly pointLightPool: PooledPointLight[] = [];
   private readonly arena: CalibrationArena;
+  private readonly cosmicSky: CosmicSky;
   private readonly websiteReticle: THREE.Mesh;
 
   private physics: PhysicsWorld | null = null;
@@ -85,7 +87,11 @@ export class RendererShell {
   private websiteWorld: WebsiteWorld | null = null;
   private worldMode: WorldMode = 'arena';
   private siteLoadGeneration = 0;
+  private isBuildingWebsite = false;
+  private hitstopTimer = 0;
   private scrollProgress = 0;
+  private activeVaultId: string | null = null;
+  private vaultTransitionCooldown = 0;
 
   private readonly shadowFocus = new THREE.Vector3(0, 1.0, 0);
   private readonly shadowBoundsHalf = 15.0;
@@ -229,6 +235,9 @@ export class RendererShell {
     this.arena = new CalibrationArena(maxAnisotropy);
     this.scene.add(this.arena.root);
 
+    this.cosmicSky = new CosmicSky();
+    this.scene.add(this.cosmicSky.root);
+
     const wReticleGeo = new THREE.RingGeometry(0.14, 0.19, 20);
     const wReticleMat = new THREE.MeshBasicMaterial({
       color: 0xf59e0b,
@@ -281,8 +290,8 @@ export class RendererShell {
       physics.addStaticPlatform(block);
     }
 
-    this.stickman = new StickmanRig(physics, this.scene, -4.5, -0.12);
-    this.cameraRig.snapToTarget(-4.5, -0.12, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+    this.stickman = new StickmanRig(physics, this.scene, -4.5, -0.05);
+    this.cameraRig.snapToTarget(-4.5, -0.05, SPATIAL_CONSTANTS.BAND_PLAY_Z);
 
     if (
       !this.capabilities.isSoftwareGl &&
@@ -399,9 +408,101 @@ export class RendererShell {
   }
 
   resetStickman(): void {
+    this.activeVaultId = null;
+    this.vaultTransitionCooldown = 0;
+    this.websiteWorld?.setActiveVaultId(null);
+    this.cameraRig.setBreachFocus(false);
+    this.aimPlane.constant = -SPATIAL_CONSTANTS.BAND_PLAY_Z;
     this.stickman?.resetToSpawn(true);
-    const focus = this.websiteWorld ? this.websiteWorld.spawnPoint : new THREE.Vector3(-4.5, -0.15, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+    const focus = this.websiteWorld
+      ? this.websiteWorld.spawnPoint
+      : new THREE.Vector3(-4.5, -0.05, SPATIAL_CONSTANTS.BAND_PLAY_Z);
     this.cameraRig.snapToTarget(focus.x, focus.y, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+  }
+
+  exitActiveVault(): void {
+    if (!this.activeVaultId || !this.stickman || !this.websiteWorld) return;
+    this.stickman.getPosition(this.stickPosScratch);
+    this.spawnImpactLight(this.stickPosScratch.x, this.stickPosScratch.y, 0xf59e0b, 9.0);
+    this.activeVaultId = null;
+    this.vaultTransitionCooldown = 0.85;
+    this.websiteWorld.setActiveVaultId(null);
+    this.stickman.setVaultTarget(false, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+    this.cameraRig.setBreachFocus(false);
+    this.aimPlane.constant = -SPATIAL_CONSTANTS.BAND_PLAY_Z;
+  }
+
+  triggerStrike(impactX?: number, impactY?: number): void {
+    if (!this.stickman) return;
+    this.stickman.getPosition(this.stickPosScratch);
+    const hitX = impactX ?? this.aimWorldPoint.x;
+    const hitY = impactY ?? this.aimWorldPoint.y;
+
+    if (this.worldMode !== 'website' || !this.websiteWorld) {
+      this.spawnImpactLight(hitX, hitY, 0x06b6d4, 7.5);
+      return;
+    }
+
+    if (this.websiteWorld.getWorldPhase() === 'intact') {
+      this.triggerShatterNow(hitX, hitY);
+    }
+
+    const res = this.websiteWorld.handleStrikeAt(
+      hitX,
+      hitY,
+      this.stickPosScratch.x,
+      this.stickPosScratch.y,
+      this.activeVaultId,
+    );
+
+    if (res.breachedVault || res.destroyedCoreVault) {
+      this.hitstopTimer = 0.04;
+      this.cameraRig.addTrauma(0.38);
+      this.spawnImpactLight(
+        res.impactX,
+        res.impactY,
+        res.destroyedCoreVault ? 0xf59e0b : 0x22d3ee,
+        13.0,
+      );
+    } else {
+      this.spawnImpactLight(hitX, hitY, 0x06b6d4, 6.5);
+    }
+  }
+
+  triggerShatterNow(impactX?: number, impactY?: number): void {
+    if (this.worldMode !== 'website' || !this.websiteWorld || !this.stickman) return;
+    this.stickman.getPosition(this.stickPosScratch);
+    const ix = impactX ?? this.stickPosScratch.x;
+    const iy = impactY ?? this.stickPosScratch.y;
+
+    if (!this.websiteWorld.triggerFracture(ix, iy)) return;
+
+    this.hitstopTimer = 0.05;
+    this.cameraRig.addTrauma(0.55);
+    this.spawnImpactLight(ix, iy, 0x06b6d4, 14.0);
+    this.spawnImpactLight(ix + 1.4, iy - 0.6, 0xf59e0b, 11.0);
+    this.cosmicSky.triggerBreakPulse(ix, iy);
+    this.cameraRig.setExpandedArena(true);
+
+    const maxFocusY = 14.0;
+    const minFocusY = Math.min(-4.65, -(this.websiteWorld.expandedPageHeightM - 4.8));
+    this.cameraRig.setWebsiteBounds({
+      minX: -10.5,
+      maxX: 10.5,
+      minY: minFocusY,
+      maxY: maxFocusY,
+    });
+    this.stickman.setVoidThresholdY(-this.websiteWorld.expandedPageHeightM - 7.0);
+
+    gameStore.updateMetrics(
+      {
+        worldPhase: this.websiteWorld.getWorldPhase(),
+        fractureCountdown: 0,
+        pageHeightM: Math.round(this.websiteWorld.expandedPageHeightM * 10) / 10,
+      },
+      performance.now(),
+      true,
+    );
   }
 
   returnToArena(): void {
@@ -419,18 +520,28 @@ export class RendererShell {
     }
 
     this.worldMode = 'arena';
+    this.hitstopTimer = 0;
+    this.activeVaultId = null;
+    this.vaultTransitionCooldown = 0;
     this.arena.root.visible = true;
+    this.cosmicSky.setVisible(false);
     this.websiteReticle.visible = false;
     this.scrollProgress = 0;
+    this.aimPlane.constant = -SPATIAL_CONSTANTS.BAND_PLAY_Z;
 
     this.stickman.setVoidThresholdY(-7.5);
-    this.stickman.setSpawnPoint(-4.5, -0.12);
+    this.stickman.setSpawnPoint(-4.5, -0.05);
     this.stickman.resetToSpawn(true);
-    this.cameraRig.snapToTarget(-4.5, -0.12, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+    this.cameraRig.setBreachFocus(false);
+    this.cameraRig.setExpandedArena(false);
+    this.cameraRig.setWebsiteBounds(null);
+    this.cameraRig.snapToTarget(-4.5, -0.05, SPATIAL_CONSTANTS.BAND_PLAY_Z);
 
     gameStore.updateMetrics(
       {
         worldMode: 'arena',
+        worldPhase: 'intact',
+        fractureCountdown: 0,
         modeLabel: '2.5D Parkour Playground',
         siteStatus: 'idle',
         siteError: null,
@@ -441,6 +552,16 @@ export class RendererShell {
         isDarkTheme: true,
         pageHeightM: 12,
         scrollProgress: 0,
+        parkourState: 'idle',
+        stickmanSpeed: 0,
+        isFlying: false,
+        isShrunk: false,
+        stickmanScale: 1.6,
+        insideVaultTitle: null,
+        vaultsCleared: 0,
+        totalVaults: 0,
+        dataOrbsCollected: 0,
+        integrityLives: 3,
         totalComponents: 0,
         spaRecovered: false,
       },
@@ -577,6 +698,7 @@ export class RendererShell {
     );
 
     let analyzed: Awaited<ReturnType<typeof analyzeWebsiteHtml>> | null = null;
+    this.isBuildingWebsite = true;
     try {
       analyzed = await analyzeWebsiteHtml(html, title, url);
       if (this.disposed || gen !== this.siteLoadGeneration) {
@@ -617,13 +739,28 @@ export class RendererShell {
 
       this.websiteWorld = world;
       this.worldMode = 'website';
+      this.hitstopTimer = 0;
+      this.activeVaultId = null;
+      this.vaultTransitionCooldown = 0;
       this.arena.root.visible = false;
+      this.cosmicSky.setVisible(true);
       this.websiteReticle.visible = true;
+      this.aimPlane.constant = -SPATIAL_CONSTANTS.BAND_PLAY_Z;
       this.scene.add(world.root);
 
       this.stickman.setVoidThresholdY(-world.pageHeightM - 6.0);
       this.stickman.setSpawnPoint(world.spawnPoint.x, world.spawnPoint.y);
       this.stickman.resetToSpawn(true);
+      const maxFocusY = 14.0;
+      const minFocusY = Math.min(-4.65, -(world.pageHeightM - 4.8));
+      this.cameraRig.setBreachFocus(false);
+      this.cameraRig.setExpandedArena(false);
+      this.cameraRig.setWebsiteBounds({
+        minX: -1.8,
+        maxX: 1.8,
+        minY: minFocusY,
+        maxY: maxFocusY,
+      });
       this.cameraRig.snapToTarget(
         world.spawnPoint.x,
         world.spawnPoint.y,
@@ -641,7 +778,9 @@ export class RendererShell {
       gameStore.updateMetrics(
         {
           worldMode: 'website',
-          modeLabel: '2.5D Living Website',
+          worldPhase: 'intact',
+          fractureCountdown: world.getFractureCountdown(),
+          modeLabel: 'Floating DOM Arena',
           siteStatus: 'ready',
           siteError: null,
           siteUrl: url,
@@ -651,6 +790,16 @@ export class RendererShell {
           isDarkTheme: resolvedDark,
           pageHeightM: Math.round(world.pageHeightM * 10) / 10,
           scrollProgress: 0,
+          parkourState: 'idle',
+          stickmanSpeed: 0,
+          isFlying: false,
+          isShrunk: false,
+          stickmanScale: 1.6,
+          insideVaultTitle: null,
+          vaultsCleared: 0,
+          totalVaults: world.getTotalVaults(),
+          dataOrbsCollected: 0,
+          integrityLives: 3,
           totalComponents: resolvedCompCount,
           spaRecovered,
         },
@@ -668,6 +817,10 @@ export class RendererShell {
         performance.now(),
         true,
       );
+    } finally {
+      if (gen === this.siteLoadGeneration) {
+        this.isBuildingWebsite = false;
+      }
     }
   }
 
@@ -695,7 +848,7 @@ export class RendererShell {
       this.websiteReticle.position.set(
         this.aimWorldPoint.x,
         this.aimWorldPoint.y,
-        SPATIAL_CONSTANTS.BAND_PLAY_Z + 0.04,
+        (this.activeVaultId ? SPATIAL_CONSTANTS.BAND_CHAMBER_CENTER_Z : SPATIAL_CONSTANTS.BAND_PLAY_Z) + 0.04,
       );
     }
   }
@@ -708,6 +861,9 @@ export class RendererShell {
       // Ignore synthetic events
     }
     this.updateAimFromPointer(e.clientX, e.clientY);
+    if (e.button === 0) {
+      this.triggerStrike(this.aimWorldPoint.x, this.aimWorldPoint.y);
+    }
   };
 
   private handlePointerMove = (e: PointerEvent): void => {
@@ -749,6 +905,40 @@ export class RendererShell {
       this.triggerRagdollTest();
     } else if (e.code === 'KeyR') {
       this.resetStickman();
+    } else if (e.code === 'KeyE') {
+      if (this.activeVaultId) {
+        this.exitActiveVault();
+      } else if (this.worldMode === 'website' && this.websiteWorld && this.stickman && this.vaultTransitionCooldown <= 0) {
+        this.stickman.getPosition(this.stickPosScratch);
+        const portal = this.websiteWorld.findNearestBreachedPortal(
+          this.stickPosScratch.x,
+          this.stickPosScratch.y,
+          3.4,
+        );
+        if (portal) {
+          this.activeVaultId = portal.id;
+          this.websiteWorld.setActiveVaultId(portal.id);
+          this.stickman.setVaultTarget(
+            true,
+            portal.chamberCenterZ,
+            portal.chamberCenterX,
+            portal.chamberCenterY,
+          );
+          this.cameraRig.setBreachFocus(true, portal.chamberCenterZ);
+          this.aimPlane.constant = -portal.chamberCenterZ;
+          this.vaultTransitionCooldown = 0.85;
+          this.spawnImpactLight(portal.portalX, portal.portalY, 0x22d3ee, 11.0);
+          this.cameraRig.addTrauma(0.24);
+        }
+      }
+    } else if (e.code === 'KeyB') {
+      if (this.worldMode === 'website' && this.websiteWorld?.getWorldPhase() === 'intact') {
+        this.triggerShatterNow();
+      } else {
+        this.triggerStrike(this.aimWorldPoint.x, this.aimWorldPoint.y);
+      }
+    } else if (e.code === 'KeyJ') {
+      this.triggerStrike(this.aimWorldPoint.x, this.aimWorldPoint.y);
     }
   };
 
@@ -794,16 +984,93 @@ export class RendererShell {
   };
 
   private stepFixed(fixedDt: number): void {
+    if (this.isBuildingWebsite) return;
+
+    this.cameraRig.getFocusTarget(this.shadowFocus);
+    this.cosmicSky.update(fixedDt, this.shadowFocus.x, this.shadowFocus.y);
+
+    for (let i = 0; i < this.pointLightPool.length; i++) {
+      const slot = this.pointLightPool[i];
+      if (!slot.active) continue;
+      slot.age += fixedDt;
+      const t = slot.age / slot.duration;
+      if (t >= 1) {
+        slot.active = false;
+        slot.light.intensity = 0;
+      } else {
+        const envelope = Math.sin(Math.PI * (1 - t)) * (1 - t);
+        slot.light.intensity = slot.peakIntensity * Math.max(0, envelope);
+      }
+    }
+
+    if (this.hitstopTimer > 0) {
+      this.hitstopTimer = Math.max(0, this.hitstopTimer - fixedDt);
+      return;
+    }
+
+    if (this.vaultTransitionCooldown > 0) {
+      this.vaultTransitionCooldown = Math.max(0, this.vaultTransitionCooldown - fixedDt);
+    }
+
     if (this.worldMode === 'arena') {
       this.arena.update(fixedDt);
-    } else if (this.websiteWorld && this.stickman) {
+    } else if (this.websiteWorld && this.stickman && this.physics) {
       this.stickman.getPosition(this.stickPosScratch);
-      this.cameraRig.getFocusTarget(this.shadowFocus);
       this.scrollProgress = this.websiteWorld.update(
         this.shadowFocus.y,
         this.stickPosScratch,
         fixedDt,
+        this.physics,
       );
+      if (
+        this.websiteWorld.getWorldPhase() === 'intact' &&
+        this.websiteWorld.getFractureCountdown() <= 0
+      ) {
+        this.triggerShatterNow(this.stickPosScratch.x, this.stickPosScratch.y);
+      }
+
+      if (this.websiteWorld.getWorldPhase() !== 'intact') {
+        const transition = this.websiteWorld.findPortalTransition(
+          this.stickPosScratch.x,
+          this.stickPosScratch.y,
+          this.activeVaultId,
+        );
+        if (transition && this.vaultTransitionCooldown <= 0) {
+          if (transition.action === 'enter') {
+            this.activeVaultId = transition.vault.id;
+            this.websiteWorld.setActiveVaultId(transition.vault.id);
+            this.stickman.setVaultTarget(
+              true,
+              transition.vault.chamberCenterZ,
+              transition.vault.chamberCenterX,
+              transition.vault.chamberCenterY,
+            );
+            this.cameraRig.setBreachFocus(true, transition.vault.chamberCenterZ);
+            this.aimPlane.constant = -transition.vault.chamberCenterZ;
+            this.vaultTransitionCooldown = 0.85;
+            this.spawnImpactLight(
+              transition.vault.portalX,
+              transition.vault.portalY,
+              0x22d3ee,
+              11.0,
+            );
+            this.cameraRig.addTrauma(0.24);
+          } else if (transition.action === 'exit') {
+            this.exitActiveVault();
+          }
+        }
+
+        if (this.activeVaultId) {
+          const collectedPos = this.websiteWorld.collectNearbyOrbs(
+            this.activeVaultId,
+            this.stickPosScratch.x,
+            this.stickPosScratch.y,
+          );
+          if (collectedPos) {
+            this.spawnImpactLight(collectedPos.x, collectedPos.y, 0xf59e0b, 8.5);
+          }
+        }
+      }
     }
 
     if (this.stickman && this.physics) {
@@ -837,20 +1104,6 @@ export class RendererShell {
           stepRes.lostLifeToVoid ? 0x06b6d4 : 0xf59e0b,
           7.5 * stepRes.impactStrength + 3.0,
         );
-      }
-    }
-
-    for (let i = 0; i < this.pointLightPool.length; i++) {
-      const slot = this.pointLightPool[i];
-      if (!slot.active) continue;
-      slot.age += fixedDt;
-      const t = slot.age / slot.duration;
-      if (t >= 1) {
-        slot.active = false;
-        slot.light.intensity = 0;
-      } else {
-        const envelope = Math.sin(Math.PI * (1 - t)) * (1 - t);
-        slot.light.intensity = slot.peakIntensity * Math.max(0, envelope);
       }
     }
   }
@@ -945,8 +1198,28 @@ export class RendererShell {
           stickmanSpeed: this.stickman
             ? Math.round(this.stickVelScratch.length() * 10) / 10
             : 0,
+          isFlying: this.stickman ? this.stickman.isInFlight() : false,
+          isShrunk: this.stickman ? this.stickman.isInsideVault() : false,
+          stickmanScale: this.stickman
+            ? Math.round(this.stickman.getScale() * 1.6 * 100) / 100
+            : 1.6,
+          insideVaultTitle:
+            this.activeVaultId && this.websiteWorld
+              ? (this.websiteWorld.getVaultById(this.activeVaultId)?.title ?? null)
+              : null,
+          vaultsCleared: this.websiteWorld ? this.websiteWorld.getVaultsCleared() : 0,
+          totalVaults: this.websiteWorld ? this.websiteWorld.getTotalVaults() : 0,
+          dataOrbsCollected: this.websiteWorld ? this.websiteWorld.getDataOrbsCollected() : 0,
           integrityLives: this.stickman ? this.stickman.getIntegrityLives() : 3,
           scrollProgress: this.scrollProgress,
+          worldPhase:
+            this.worldMode === 'website' && this.websiteWorld
+              ? this.websiteWorld.getWorldPhase()
+              : 'intact',
+          fractureCountdown:
+            this.worldMode === 'website' && this.websiteWorld
+              ? this.websiteWorld.getFractureCountdown()
+              : 0,
         },
         nowMs,
       );
@@ -978,6 +1251,7 @@ export class RendererShell {
     this.websiteWorld?.dispose(this.physics);
     this.physics?.free();
     this.arena.dispose();
+    this.cosmicSky.dispose();
     this.websiteReticle.geometry.dispose();
     (this.websiteReticle.material as THREE.Material).dispose();
     this.envTarget?.dispose();

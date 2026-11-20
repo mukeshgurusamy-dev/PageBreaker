@@ -51,6 +51,8 @@ export default function App() {
           onToggleCameraMode={() => engineRef.current?.toggleCameraMode()}
           onPulseLights={() => engineRef.current?.triggerPointLightPulseWave()}
           onTriggerRagdoll={() => engineRef.current?.triggerRagdollTest()}
+          onTriggerShatter={() => engineRef.current?.triggerShatterNow()}
+          onExitVault={() => engineRef.current?.exitActiveVault()}
           onResetStickman={() => engineRef.current?.resetStickman()}
           onToggleZen={() => engineRef.current?.toggleZenMode()}
           onLoadUrl={(url) => engineRef.current?.loadPublicUrl(url) ?? Promise.resolve()}

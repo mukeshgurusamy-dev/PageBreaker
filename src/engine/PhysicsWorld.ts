@@ -34,17 +34,29 @@ export function packInteractionGroups(membership: number, filter: number): numbe
   return ((membership & 0xffff) << 16) | (filter & 0xffff);
 }
 
+interface KinematicPlatformEntry {
+  body: RAPIER.RigidBody;
+  collider: RAPIER.Collider;
+  block: PlatformBlock;
+  isOneWay: boolean;
+  prevX: number;
+  prevY: number;
+  dx: number;
+  dy: number;
+}
+
 /**
  * Rapier3D WASM physics wrapper enforcing 2.5D planar constraints, collision bitmasks,
- * KinematicCharacterController movement, ledge corner spatial queries, and explicit .free() cleanup.
+ * KinematicCharacterController movement, kinematic island delta inheritance,
+ * ledge corner spatial queries, and explicit .free() cleanup.
  */
 export class PhysicsWorld {
   public readonly world: RAPIER.World;
   private readonly staticBodies: RAPIER.RigidBody[] = [];
   private readonly staticColliders: RAPIER.Collider[] = [];
   private readonly controllers: RAPIER.KinematicCharacterController[] = [];
-  private readonly grabbableCorners: LedgeCorner[] = [];
   private readonly platformMap = new Map<number, { block: PlatformBlock; isOneWay: boolean }>();
+  private readonly kinematicPlatforms = new Map<number, KinematicPlatformEntry>();
   private freed = false;
 
   private constructor() {
@@ -84,25 +96,6 @@ export class PhysicsWorld {
     const isOneWay = membership === COLLISION_GROUP.CARD_SHELL;
     this.platformMap.set(collider.handle, { block, isOneWay });
 
-    if (block.grabbableCorners !== false && Math.abs(block.z - SPATIAL_CONSTANTS.BAND_PLAY_Z) < 0.75) {
-      this.grabbableCorners.push(
-        {
-          id: `${block.id}:left`,
-          x: block.x - block.halfW,
-          y: block.y + block.halfH,
-          z: SPATIAL_CONSTANTS.BAND_PLAY_Z,
-          side: -1,
-        },
-        {
-          id: `${block.id}:right`,
-          x: block.x + block.halfW,
-          y: block.y + block.halfH,
-          z: SPATIAL_CONSTANTS.BAND_PLAY_Z,
-          side: 1,
-        },
-      );
-    }
-
     return collider;
   }
 
@@ -116,6 +109,7 @@ export class PhysicsWorld {
 
   clearStaticPlatforms(): void {
     for (const col of this.staticColliders) {
+      this.platformMap.delete(col.handle);
       if (col.isValid()) this.world.removeCollider(col, false);
     }
     for (const body of this.staticBodies) {
@@ -123,8 +117,6 @@ export class PhysicsWorld {
     }
     this.staticColliders.length = 0;
     this.staticBodies.length = 0;
-    this.grabbableCorners.length = 0;
-    this.platformMap.clear();
   }
 
   createKinematicPlatform(
@@ -134,6 +126,9 @@ export class PhysicsWorld {
     halfW: number,
     halfH: number,
     halfD: number,
+    membership: number = COLLISION_GROUP.TERRAIN,
+    blockMeta?: PlatformBlock,
+    isOneWayOverride?: boolean,
   ): { body: RAPIER.RigidBody; collider: RAPIER.Collider } {
     const bodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y, z);
     const body = this.world.createRigidBody(bodyDesc);
@@ -141,18 +136,72 @@ export class PhysicsWorld {
       .setFriction(0.8)
       .setCollisionGroups(
         packInteractionGroups(
-          COLLISION_GROUP.TERRAIN,
+          membership,
           COLLISION_GROUP.PLAYER | COLLISION_GROUP.ENEMY | COLLISION_GROUP.DEBRIS,
         ),
       );
     const collider = this.world.createCollider(colDesc, body);
+
+    const block: PlatformBlock = blockMeta ?? {
+      id: `kin-${collider.handle}`,
+      x,
+      y,
+      z,
+      halfW,
+      halfH,
+      halfD,
+      grabbableCorners: membership === COLLISION_GROUP.CARD_SHELL,
+    };
+    const isOneWay = isOneWayOverride ?? membership === COLLISION_GROUP.CARD_SHELL;
+    this.platformMap.set(collider.handle, { block, isOneWay });
+    this.kinematicPlatforms.set(collider.handle, {
+      body,
+      collider,
+      block,
+      isOneWay,
+      prevX: x,
+      prevY: y,
+      dx: 0,
+      dy: 0,
+    });
     return { body, collider };
+  }
+
+  updateKinematicPlatform(
+    colliderHandle: number,
+    nextX: number,
+    nextY: number,
+    nextZ?: number,
+  ): void {
+    const entry = this.kinematicPlatforms.get(colliderHandle);
+    if (!entry || !entry.body.isValid()) return;
+    entry.dx = nextX - entry.prevX;
+    entry.dy = nextY - entry.prevY;
+    entry.prevX = nextX;
+    entry.prevY = nextY;
+    const zVal = nextZ ?? entry.block.z;
+    entry.body.setNextKinematicTranslation({ x: nextX, y: nextY, z: zVal });
+  }
+
+  getPlatformDelta(colliderHandle: number, out: { dx: number; dy: number }): void {
+    const entry = this.kinematicPlatforms.get(colliderHandle);
+    if (!entry) {
+      out.dx = 0;
+      out.dy = 0;
+      return;
+    }
+    out.dx = entry.dx;
+    out.dy = entry.dy;
   }
 
   removeDynamicOrKinematicBody(body: RAPIER.RigidBody, collider?: RAPIER.Collider): void {
     if (this.freed) return;
-    if (collider && collider.isValid()) {
-      this.world.removeCollider(collider, false);
+    if (collider) {
+      this.platformMap.delete(collider.handle);
+      this.kinematicPlatforms.delete(collider.handle);
+      if (collider.isValid()) {
+        this.world.removeCollider(collider, false);
+      }
     }
     if (body.isValid()) {
       this.world.removeRigidBody(body);
@@ -249,7 +298,8 @@ export class PhysicsWorld {
   }
 
   /**
-   * Finds the nearest grabbable ledge corner within reach for Fall-Grab Pendulum swings.
+   * Finds the nearest grabbable ledge corner within reach for Fall-Grab Pendulum swings,
+   * querying live platform coordinates so moving Mirror-Dimension islands always match visually.
    */
   findNearestGrabbableCorner(
     x: number,
@@ -261,21 +311,34 @@ export class PhysicsWorld {
     let bestScore = Infinity;
     const maxSq = maxRadius * maxRadius;
 
-    for (let i = 0; i < this.grabbableCorners.length; i++) {
-      const corner = this.grabbableCorners[i];
-      const dx = corner.x - x;
-      const dy = corner.y - y;
-      const dSq = dx * dx + dy * dy;
-      if (dSq > maxSq) continue;
+    for (const entry of this.platformMap.values()) {
+      const block = entry.block;
+      if (block.grabbableCorners === false) continue;
+      if (Math.abs(block.z - SPATIAL_CONSTANTS.BAND_PLAY_Z) >= 0.75) continue;
 
-      // Prefer corners slightly above chest height and in the player's facing/input direction
-      const heightPenalty = dy < -0.25 ? 0.65 : 0;
-      const dirBonus = preferSide !== 0 && Math.sign(dx) === Math.sign(preferSide) ? -0.18 : 0;
-      const score = Math.sqrt(dSq) + heightPenalty + dirBonus;
+      const topY = block.y + block.halfH;
+      const dy = topY - y;
+      const sides: Array<-1 | 1> = [-1, 1];
+      for (const side of sides) {
+        const cx = block.x + side * block.halfW;
+        const dx = cx - x;
+        const dSq = dx * dx + dy * dy;
+        if (dSq > maxSq) continue;
 
-      if (score < bestScore) {
-        bestScore = score;
-        best = corner;
+        const heightPenalty = dy < -0.25 ? 0.65 : 0;
+        const dirBonus = preferSide !== 0 && Math.sign(dx) === Math.sign(preferSide) ? -0.18 : 0;
+        const score = Math.sqrt(dSq) + heightPenalty + dirBonus;
+
+        if (score < bestScore) {
+          bestScore = score;
+          best = {
+            id: `${block.id}:${side < 0 ? 'left' : 'right'}`,
+            x: cx,
+            y: topY,
+            z: SPATIAL_CONSTANTS.BAND_PLAY_Z,
+            side,
+          };
+        }
       }
     }
 
@@ -285,6 +348,15 @@ export class PhysicsWorld {
   step(): void {
     if (this.freed) return;
     this.world.step();
+
+    // Sync live translated coordinates into platformMap blocks after Rapier commits kinematic motion
+    for (const entry of this.kinematicPlatforms.values()) {
+      if (!entry.body.isValid()) continue;
+      const tr = entry.body.translation();
+      entry.block.x = tr.x;
+      entry.block.y = tr.y;
+      entry.block.z = tr.z;
+    }
   }
 
   free(): void {
@@ -294,6 +366,8 @@ export class PhysicsWorld {
       this.world.removeCharacterController(c);
     }
     this.controllers.length = 0;
+    this.kinematicPlatforms.clear();
+    this.platformMap.clear();
     this.world.free();
   }
 }

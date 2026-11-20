@@ -59,6 +59,7 @@ export type StickmanParkourState =
   | 'jump_rise'
   | 'apex_hang'
   | 'fast_fall'
+  | 'flight'
   | 'wall_slide'
   | 'crouch_slide'
   | 'shoulder_roll'
@@ -75,6 +76,24 @@ export interface PlatformBlock {
   halfH: number;
   halfD: number;
   grabbableCorners?: boolean;
+}
+
+export interface CyberVaultPortal {
+  id: string;
+  title: string;
+  isBreached: boolean;
+  isCoreDestroyed: boolean;
+  portalX: number;
+  portalY: number;
+  portalHalfW: number;
+  portalHalfH: number;
+  chamberCenterX: number;
+  chamberCenterY: number;
+  chamberCenterZ: number;
+  chamberHalfW: number;
+  chamberHalfH: number;
+  exitX: number;
+  exitY: number;
 }
 
 export type WeaponId =
@@ -121,6 +140,7 @@ export interface RendererCapabilities {
 }
 
 export type WorldMode = 'arena' | 'website';
+export type WorldPhase = 'intact' | 'fracturing' | 'broken_arena';
 export type SiteLoadStatus = 'idle' | 'fetching' | 'analyzing' | 'baking' | 'ready' | 'error';
 export type ShowcaseEraId = '1998-retro' | '2016-portal' | '2026-bastion';
 
@@ -172,6 +192,8 @@ export interface HudSnapshot {
   stepReady: number;
   modeLabel: string;
   worldMode: WorldMode;
+  worldPhase: WorldPhase;
+  fractureCountdown: number;
   fps: number;
   frameTimeMs: number;
   drawCalls: number;
@@ -181,16 +203,23 @@ export interface HudSnapshot {
   webglSupported: boolean;
   capabilities: RendererCapabilities;
 
-  /** Step 2 Stickman parkour & lives telemetry */
+  /** Step 2 / 3C Stickman parkour, flight, shrink-vault & lives telemetry */
   parkourState: StickmanParkourState;
   stickmanSpeed: number;
+  isFlying: boolean;
+  isShrunk: boolean;
+  stickmanScale: number;
+  insideVaultTitle: string | null;
+  vaultsCleared: number;
+  totalVaults: number;
+  dataOrbsCollected: number;
   integrityLives: number;
   maxIntegrityLives: number;
   stickmanHp: number;
   maxStickmanHp: number;
   overdriveCharge: number;
 
-  /** Step 3 Website Capture & 4-Decade Craft Telemetry */
+  /** Step 3 / 3C Website Capture & Craft Telemetry */
   siteStatus: SiteLoadStatus;
   siteError: string | null;
   siteUrl: string;
@@ -208,4 +237,5 @@ export interface HudSnapshot {
   escalationPhase: EscalationPhase;
   awakenedCount: number;
 }
+
 

@@ -16,6 +16,7 @@ import {
   RotateCcw,
   Sparkles,
   X,
+  Zap,
 } from 'lucide-react';
 import { gameStore } from '../engine/GameStore';
 import type { FortressTier, ShowcaseEraId, StickmanParkourState } from '../types/game';
@@ -24,6 +25,8 @@ interface HudShellProps {
   onToggleCameraMode: () => void;
   onPulseLights: () => void;
   onTriggerRagdoll: () => void;
+  onTriggerShatter: () => void;
+  onExitVault?: () => void;
   onResetStickman: () => void;
   onToggleZen: () => void;
   onLoadUrl: (url: string) => Promise<void>;
@@ -42,6 +45,7 @@ const STATE_LABELS: Record<StickmanParkourState, string> = {
   crouch_slide: 'Crouch Slide',
   shoulder_roll: 'Shoulder Roll',
   ledge_swing: 'Ledge Swing',
+  flight: 'Free Flight',
   ragdoll: 'PD Ragdoll',
   kip_up: 'Kip Up',
 };
@@ -63,6 +67,8 @@ export function HudShell({
   onToggleCameraMode,
   onPulseLights,
   onTriggerRagdoll,
+  onTriggerShatter,
+  onExitVault,
   onResetStickman,
   onToggleZen,
   onLoadUrl,
@@ -123,26 +129,58 @@ export function HudShell({
     <div className="pointer-events-none fixed inset-0 z-10 flex flex-col justify-between p-4 sm:p-5">
       {/* Top Perimeter Strip */}
       <div className="flex flex-col gap-2">
-        <header className="flex items-center justify-between gap-3">
-          <div className="pointer-events-auto hud-surface-subtle flex items-center gap-3 rounded-lg px-4 py-2.5 min-w-0">
-            <span className="font-[family-name:var(--font-display)] text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0">
+        <header className="flex items-center justify-between gap-2">
+          <div className="pointer-events-auto hud-surface-subtle flex items-center gap-2.5 rounded-lg px-3.5 py-2 min-w-0 max-w-[44%] overflow-hidden">
+            <span className="font-[family-name:var(--font-display)] text-sm sm:text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0">
               PageBreaker
             </span>
             <span className="h-3.5 w-px bg-white/10 shrink-0" aria-hidden="true" />
-            <div className="hidden md:flex items-center gap-2 text-xs text-zinc-400 truncate max-w-[280px]">
-              <span className="truncate">{hud.siteTitle}</span>
-            </div>
-            {tierMeta && (
+            {!hud.isShrunk && (
+              <div className="hidden xl:flex items-center gap-2 text-xs text-zinc-400 truncate max-w-[145px]">
+                <span className="truncate">{hud.siteTitle}</span>
+              </div>
+            )}
+            {tierMeta && !hud.isShrunk && (
               <>
-                <span className="h-3.5 w-px bg-white/10 hidden md:inline shrink-0" aria-hidden="true" />
-                <span className={`hidden md:inline text-xs font-mono font-medium whitespace-nowrap shrink-0 ${tierMeta.colorClass}`}>
-                  {tierMeta.label} · C {hud.meanCraftScore.toFixed(1)}
+                <span className="h-3.5 w-px bg-white/10 hidden xl:inline shrink-0" aria-hidden="true" />
+                <span className={`hidden lg:inline text-xs font-mono font-medium whitespace-nowrap shrink-0 ${tierMeta.colorClass}`}>
+                  C {hud.meanCraftScore.toFixed(1)}
+                </span>
+              </>
+            )}
+            {hud.worldMode === 'website' && (
+              <>
+                <span className="h-3.5 w-px bg-white/10 hidden lg:inline shrink-0" aria-hidden="true" />
+                <span
+                  className={`hidden lg:inline text-xs font-mono font-medium tabular-nums whitespace-nowrap shrink-0 truncate max-w-[125px] ${
+                    hud.isShrunk
+                      ? 'text-cyan-300'
+                      : hud.worldPhase === 'intact'
+                        ? 'text-amber-300'
+                        : 'text-cyan-300'
+                  }`}
+                >
+                  {hud.isShrunk
+                    ? `Vault · ${hud.insideVaultTitle ?? 'Chamber'}`
+                    : hud.worldPhase === 'intact'
+                      ? `Intact · Break ${hud.fractureCountdown.toFixed(1)}s`
+                      : hud.worldPhase === 'fracturing'
+                        ? 'Breaking...'
+                        : 'Floating Arena'}
                 </span>
               </>
             )}
             <span className="h-3.5 w-px bg-white/10 hidden sm:inline shrink-0" aria-hidden="true" />
-            <span className="hidden sm:inline text-xs text-amber-400 font-medium whitespace-nowrap shrink-0">
+            <span
+              className={`hidden sm:inline text-xs font-medium whitespace-nowrap shrink-0 ${
+                hud.isFlying ? 'text-cyan-300' : 'text-amber-400'
+              }`}
+            >
               {STATE_LABELS[hud.parkourState]}
+            </span>
+            <span className="h-3.5 w-px bg-white/10 hidden md:inline shrink-0" aria-hidden="true" />
+            <span className="hidden md:inline text-xs font-mono tabular-nums text-zinc-300 whitespace-nowrap shrink-0">
+              {hud.isShrunk ? 'Micro 0.38×' : `Hero ${hud.stickmanScale.toFixed(1)}×`}
             </span>
           </div>
 
@@ -150,7 +188,7 @@ export function HudShell({
             <button
               type="button"
               onClick={() => setSiteDrawerOpen((v) => !v)}
-              className="pointer-events-auto hud-surface-subtle flex items-center gap-2 rounded-lg px-3.5 py-2.5 text-xs font-medium text-zinc-200 transition-colors hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 whitespace-nowrap shrink-0"
+              className="pointer-events-auto hud-surface-subtle flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-medium text-zinc-200 transition-colors hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 whitespace-nowrap shrink-0"
             >
               {isBusy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-cyan-400" />
@@ -166,9 +204,21 @@ export function HudShell({
             </button>
           )}
 
-          <div className="pointer-events-auto hud-surface-subtle flex items-center gap-3.5 rounded-lg px-4 py-2.5 text-xs font-mono tabular-nums text-zinc-300 shrink-0">
+          <div className="pointer-events-auto hud-surface-subtle flex items-center gap-3 rounded-lg px-3.5 py-2 text-xs font-mono tabular-nums text-zinc-300 shrink-0">
             {hud.worldMode === 'website' && (
               <>
+                <div className="hidden md:flex items-center gap-1.5 whitespace-nowrap">
+                  <span className="text-zinc-500">Vaults</span>
+                  <span className="text-cyan-400">
+                    {hud.vaultsCleared}/{hud.totalVaults}
+                  </span>
+                </div>
+                <span aria-hidden="true" className="text-zinc-600 hidden md:inline">·</span>
+                <div className="hidden md:flex items-center gap-1.5 whitespace-nowrap">
+                  <span className="text-zinc-500">Orbs</span>
+                  <span className="text-amber-300">{hud.dataOrbsCollected}</span>
+                </div>
+                <span aria-hidden="true" className="text-zinc-600 hidden md:inline">·</span>
                 <div className="hidden sm:flex items-center gap-1.5 whitespace-nowrap">
                   <span className="text-zinc-500">Scroll</span>
                   <span className="text-cyan-400">{Math.round(hud.scrollProgress * 100)}%</span>
@@ -181,12 +231,12 @@ export function HudShell({
               className="flex items-center gap-2 whitespace-nowrap"
               aria-label={`Lives: ${hud.integrityLives} of ${hud.maxIntegrityLives}`}
             >
-              <span className="text-zinc-500 hidden sm:inline">Integrity</span>
+              <span className="text-zinc-500 hidden xl:inline">Integrity</span>
               <div className="flex items-center gap-1">
                 {Array.from({ length: hud.maxIntegrityLives }).map((_, idx) => (
                   <span
                     key={idx}
-                    className={`h-2.5 w-4 rounded-xs transition-colors ${
+                    className={`h-2.5 w-3.5 rounded-xs transition-colors ${
                       idx < hud.integrityLives ? 'bg-red-500' : 'bg-white/12'
                     }`}
                   />
@@ -358,6 +408,34 @@ export function HudShell({
                 </kbd>
               </button>
 
+              {hud.worldMode === 'website' && hud.worldPhase === 'intact' && (
+                <button
+                  type="button"
+                  onClick={onTriggerShatter}
+                  className="flex items-center gap-2 rounded-lg bg-cyan-500/20 px-3.5 py-2 text-xs font-semibold text-cyan-200 transition-colors hover:bg-cyan-500/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 whitespace-nowrap shrink-0"
+                >
+                  <Zap className="h-3.5 w-3.5 text-cyan-300" />
+                  <span>Break Site</span>
+                  <kbd className="rounded bg-black/40 px-1.5 py-0.5 font-mono text-[10px] text-cyan-200">
+                    B
+                  </kbd>
+                </button>
+              )}
+
+              {hud.isShrunk && onExitVault && (
+                <button
+                  type="button"
+                  onClick={onExitVault}
+                  className="flex items-center gap-2 rounded-lg bg-amber-500/25 px-3.5 py-2 text-xs font-semibold text-amber-200 transition-colors hover:bg-amber-500/35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400 whitespace-nowrap shrink-0"
+                >
+                  <Zap className="h-3.5 w-3.5 text-amber-300" />
+                  <span>Exit Vault</span>
+                  <kbd className="rounded bg-black/40 px-1.5 py-0.5 font-mono text-[10px] text-amber-200">
+                    E
+                  </kbd>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={onPulseLights}
@@ -383,15 +461,15 @@ export function HudShell({
             <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
               <span>Move: WASD / Arrows</span>
               <span aria-hidden="true">·</span>
-              <span>Jump: Space</span>
+              <span className="text-cyan-300 font-medium">Fly: Double-Tap / Hold Space</span>
               <span aria-hidden="true">·</span>
-              <span className="text-amber-300 font-medium">Drop Through: S + Space (or hold S)</span>
+              <span>Drop / Descend: S</span>
               <span aria-hidden="true">·</span>
-              <span>Slide: S / Shift</span>
+              <span className="text-amber-300 font-medium">Break Card & Attack: Click / J</span>
               <span aria-hidden="true">·</span>
-              <span>Ledge Grab: F</span>
+              <span>Enter / Exit Vault: E</span>
               <span aria-hidden="true">·</span>
-              <span>Aim: Mouse</span>
+              <span>Grab: F</span>
             </div>
           </div>
         )}

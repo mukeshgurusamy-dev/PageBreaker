@@ -377,7 +377,7 @@ export async function analyzeWebsiteHtml(
   iframe.style.left = '-99999px';
   iframe.style.top = '0';
   iframe.style.width = `${SPATIAL_CONSTANTS.DOM_VIEWPORT_WIDTH_PX}px`;
-  iframe.style.height = '2400px';
+  iframe.style.height = '900px';
   iframe.style.border = '0';
   iframe.style.pointerEvents = 'none';
   iframe.style.visibility = 'visible';
@@ -452,6 +452,7 @@ export async function analyzeWebsiteHtml(
   const components: ExtractedDomComponent[] = [];
   const words: ExtractedWordBox[] = [];
   const seenBoxes: Array<{ l: number; t: number; w: number; h: number }> = [];
+  const containerBoxes: Array<{ l: number; t: number; r: number; b: number; el: HTMLElement }> = [];
 
   for (let i = 0; i < candidates.length; i++) {
     const el = candidates[i];
@@ -462,8 +463,16 @@ export async function analyzeWebsiteHtml(
 
     const rect = el.getBoundingClientRect();
     if (rect.width < 32 || rect.height < 20) continue;
-    // Skip giant whole-page wrapper containers
-    if (rect.width > pageWidthPx - 12 && rect.height > pageHeightPx * 0.72) continue;
+
+    // Skip whole-page or multi-section layout wrappers (e.g., .window-frame, #root, page shells)
+    const tag = el.tagName.toLowerCase();
+    if (rect.width > pageWidthPx * 0.72 && rect.height > pageHeightPx * 0.45) continue;
+    if (
+      (tag === 'div' || tag === 'td') &&
+      el.querySelectorAll('header, nav, section, article, form, footer, table').length >= 2
+    ) {
+      continue;
+    }
 
     // Deduplicate identical nested bounding boxes
     const duplicateBox = seenBoxes.some(
@@ -474,11 +483,57 @@ export async function analyzeWebsiteHtml(
         Math.abs(b.h - rect.height) < 12,
     );
     if (duplicateBox) continue;
-    seenBoxes.push({ l: rect.left, t: rect.top, w: rect.width, h: rect.height });
 
     const craft = evaluateElementCraft(el, cs, globalSignals);
     const tier = scoreToFortressTier(craft.cScore);
     const clanId = classifyClan(el, cs);
+
+    // Check if this element sits cleanly inside an already-extracted structural container
+    const enclosingParent = containerBoxes.find(
+      (cb) =>
+        cb.el.contains(el) &&
+        rect.left >= cb.l - 4 &&
+        rect.right <= cb.r + 4 &&
+        rect.top >= cb.t - 4 &&
+        rect.bottom <= cb.b + 4,
+    );
+
+    const isInteractiveChild =
+      tag === 'button' ||
+      tag === 'a' ||
+      tag === 'input' ||
+      tag === 'select' ||
+      el.getAttribute('role') === 'button';
+
+    // Always extract text words for Glyph Atlas / destructible typography, even inside cards
+    const compWords: ExtractedWordBox[] = [];
+    if ((clanId === 'typography' || clanId === 'button_nav') && words.length < 110) {
+      extractWordsFromElement(doc, el, cs, 0, 110 - words.length, compWords);
+      for (const wb of compWords) words.push(wb);
+    }
+
+    // Avoid Z-fighting duplicate slabs for passive headings/paragraphs/nav-wrappers inside cards
+    if (enclosingParent && !isInteractiveChild) {
+      continue;
+    }
+
+    seenBoxes.push({ l: rect.left, t: rect.top, w: rect.width, h: rect.height });
+    if (
+      tag === 'header' ||
+      tag === 'section' ||
+      tag === 'article' ||
+      tag === 'form' ||
+      tag === 'footer' ||
+      (tag === 'div' && (clanId === 'card' || clanId === 'media'))
+    ) {
+      containerBoxes.push({
+        l: rect.left,
+        t: rect.top,
+        r: rect.right,
+        b: rect.bottom,
+        el,
+      });
+    }
 
     const wM = rect.width * SPATIAL_CONSTANTS.WORLD_SCALE;
     const hM = rect.height * SPATIAL_CONSTANTS.WORLD_SCALE;
@@ -490,13 +545,7 @@ export async function analyzeWebsiteHtml(
     const isHollowCard = clanId === 'card' && wM >= 1.8 && hM >= 1.2;
     const isStickyNav =
       (clanId === 'button_nav' && (cs.position === 'sticky' || cs.position === 'fixed')) ||
-      el.tagName.toLowerCase() === 'header';
-
-    const compWords: ExtractedWordBox[] = [];
-    if ((clanId === 'typography' || clanId === 'button_nav') && words.length < 110) {
-      extractWordsFromElement(doc, el, cs, 0, 110 - words.length, compWords);
-      for (const wb of compWords) words.push(wb);
-    }
+      tag === 'header';
 
     const accentColor =
       cs.borderTopColor && cs.borderTopColor !== 'rgba(0, 0, 0, 0)'
@@ -505,7 +554,7 @@ export async function analyzeWebsiteHtml(
 
     components.push({
       id: `dom-${components.length}`,
-      tagName: el.tagName.toLowerCase(),
+      tagName: tag,
       clanId,
       x: xM,
       y: yM,

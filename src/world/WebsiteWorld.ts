@@ -10,77 +10,104 @@ import {
   COLLISION_GROUP,
   RENDER_ORDER,
   SPATIAL_CONSTANTS,
+  type CyberVaultPortal,
   type ExtractedDomComponent,
   type FortressTier,
   type PlatformBlock,
+  type WorldPhase,
 } from '../types/game';
 import type { AnalyzedWebsite } from './DomAnalyzer';
 import type { PhysicsWorld } from '../engine/PhysicsWorld';
 import { SeededPRNG } from '../math/prng';
+import { dampScalar } from '../math/springs';
 
 const BACKDROP_FRAGMENT_SHADER = /* glsl */ `
 precision highp float;
 precision highp sampler2DArray;
 
-#define MAX_CRATERS 48
-
 uniform sampler2DArray uTileArray;
 uniform int uTileCount;
-uniform vec4 uCraters[MAX_CRATERS];
+uniform float uLayerIndex;
+uniform float uOpacity;
 
 in vec2 vUv;
-in float vLayer;
-
 out vec4 fragColor;
 
 void main() {
-  float layerIdx = clamp(floor(vLayer + 0.5), 0.0, float(max(0, uTileCount - 1)));
-  // Canvas pixels are top-down; flip V so each page slice renders upright
+  if (uOpacity <= 0.01) discard;
+  float layerIdx = clamp(floor(uLayerIndex + 0.5), 0.0, float(max(0, uTileCount - 1)));
   vec2 sampleUv = vec2(vUv.x, 1.0 - vUv.y);
   vec4 texel = texture(uTileArray, vec3(sampleUv, layerIdx));
-
-  // Pre-wired scorch crater darkening hook for Step 4 Pixel Bombs
-  vec3 color = texel.rgb;
-  for (int i = 0; i < MAX_CRATERS; i++) {
-    vec4 cr = uCraters[i];
-    if (cr.w > 0.001) {
-      float d = length(vec2(vUv.x - cr.x, vUv.y - cr.y));
-      float mask = smoothstep(cr.w, cr.w * 0.25, d);
-      color = mix(color, color * 0.18 + vec3(0.08, 0.03, 0.01), mask * 0.75);
-    }
-  }
-
-  fragColor = vec4(color, 1.0);
+  fragColor = vec4(texel.rgb, texel.a * uOpacity);
 }
 `;
 
 const BACKDROP_VERTEX_SHADER = /* glsl */ `
-attribute float aLayer;
-
 out vec2 vUv;
-out float vLayer;
-
 void main() {
   vUv = uv;
-  vLayer = aLayer;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
-function createCornerAoTexture(): THREE.CanvasTexture {
+function createCyberCircuitTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 256;
   canvas.height = 256;
   const ctx = canvas.getContext('2d');
   if (ctx) {
-    ctx.fillStyle = '#1b1d26';
+    ctx.fillStyle = '#0c101b';
     ctx.fillRect(0, 0, 256, 256);
-    const grad = ctx.createRadialGradient(128, 128, 32, 128, 128, 175);
-    grad.addColorStop(0, 'rgba(38, 42, 54, 0.92)');
-    grad.addColorStop(0.65, 'rgba(20, 22, 30, 0.96)');
-    grad.addColorStop(1, 'rgba(7, 8, 12, 1.0)');
+
+    // Inner ambient cyber vignette
+    const grad = ctx.createRadialGradient(128, 128, 18, 128, 128, 170);
+    grad.addColorStop(0, 'rgba(14, 116, 144, 0.28)');
+    grad.addColorStop(0.6, 'rgba(15, 23, 42, 0.42)');
+    grad.addColorStop(1, 'rgba(5, 7, 13, 0.95)');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 256, 256);
+
+    // Subtle PCB / cyber-vault grid lines
+    ctx.strokeStyle = 'rgba(34, 211, 238, 0.16)';
+    ctx.lineWidth = 1.5;
+    for (let x = 32; x < 256; x += 32) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, 256);
+      ctx.stroke();
+    }
+    for (let y = 32; y < 256; y += 32) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(256, y);
+      ctx.stroke();
+    }
+
+    // Glowing data trace elbows & amber nodes
+    ctx.strokeStyle = 'rgba(6, 182, 212, 0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(16, 64);
+    ctx.lineTo(96, 64);
+    ctx.lineTo(128, 96);
+    ctx.lineTo(240, 96);
+    ctx.moveTo(24, 192);
+    ctx.lineTo(112, 192);
+    ctx.lineTo(144, 160);
+    ctx.lineTo(224, 160);
+    ctx.stroke();
+
+    ctx.fillStyle = '#f59e0b';
+    for (const [nx, ny] of [
+      [96, 64],
+      [128, 96],
+      [112, 192],
+      [144, 160],
+    ]) {
+      ctx.beginPath();
+      ctx.arc(nx, ny, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -126,13 +153,13 @@ function normalizeExtrudeCapUvs(geo: THREE.BufferGeometry, w: number, h: number)
 function tierToArmorColor(tier: FortressTier, isDarkTheme: boolean): number {
   switch (tier) {
     case 'tier_1_outpost':
-      return isDarkTheme ? 0x27272a : 0x64748b;
+      return isDarkTheme ? 0x27272a : 0xcbd5e1;
     case 'tier_2_foundry':
-      return isDarkTheme ? 0x334155 : 0x475569;
+      return isDarkTheme ? 0x334155 : 0x94a3b8;
     case 'tier_3_citadel':
-      return isDarkTheme ? 0x1e3a5f : 0x334155;
+      return isDarkTheme ? 0x1e3a5f : 0x475569;
     case 'tier_4_bastion':
-      return isDarkTheme ? 0x181822 : 0x1e293b;
+      return isDarkTheme ? 0x181822 : 0x334155;
   }
 }
 
@@ -149,43 +176,379 @@ function tierToAccentColor(tier: FortressTier): number {
   }
 }
 
-interface ChunkEntry {
-  minY: number;
-  maxY: number;
+function easeOutBackClamped(t: number): number {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  const c1 = 1.05;
+  const c3 = c1 + 1;
+  const u = t - 1;
+  return 1 + c3 * u * u * u + c1 * u * u;
+}
+
+interface InteriorKinematicCollider {
+  body: RAPIER.RigidBody;
+  collider: RAPIER.Collider;
+  localX: number;
+  localY: number;
+  localZ: number;
+}
+
+interface DataOrbPickup {
+  mesh: THREE.Mesh;
+  localX: number;
+  localY: number;
+  collected: boolean;
+  phase: number;
+}
+
+interface CyberVaultData {
+  title: string;
+  vaultGroup: THREE.Group;
+  frontDoorFrame: THREE.Mesh;
+  exitBeaconMesh: THREE.Mesh;
+  coreGroup: THREE.Group;
+  coreGyroRing: THREE.Mesh;
+  coreMesh: THREE.Mesh;
+  orbs: DataOrbPickup[];
+  interiorColliders: InteriorKinematicCollider[];
+  chamberW: number;
+  chamberH: number;
+  portalHalfW: number;
+  portalHalfH: number;
+  exitLocalX: number;
+  exitLocalY: number;
+  isBreached: boolean;
+  isCoreDestroyed: boolean;
+}
+
+interface LivingIslandEntry {
+  id: string;
   group: THREE.Group;
+  frontCoverMesh: THREE.Mesh;
+  frontWingLeft: THREE.Mesh | null;
+  frontWingRight: THREE.Mesh | null;
+  body: RAPIER.RigidBody;
+  collider: RAPIER.Collider;
+  block: PlatformBlock;
+  intactX: number;
+  intactY: number;
+  intactZ: number;
+  intactPhysY: number;
+  curX: number;
+  curY: number;
+  curZ: number;
+  brokenX: number;
+  brokenY: number;
+  brokenZ: number;
+  brokenPhysY: number;
+  brokenRotY: number;
+  brokenRotZ: number;
+  halfW: number;
+  visualHalfH: number;
+  hoverAmp: number;
+  hoverFreq: number;
+  hoverPhase: number;
+  staggerDelay: number;
+  vault: CyberVaultData | null;
+}
+
+export interface VaultInteractionResult {
+  breachedVault: CyberVaultPortal | null;
+  destroyedCoreVault: CyberVaultPortal | null;
+  collectedOrbPos: THREE.Vector3 | null;
+  impactX: number;
+  impactY: number;
 }
 
 /**
- * Step 3 — 3-Pass @zumer/snapdom + 4-Band 2.5D Website World Builder:
- * - Pass 0: Band -2 full-page vertical tiles rendered via GLSL3 DataArrayTexture (toneMapped: false)
- * - Pass 1: Band -1 bounded hollow Mimic Card chambers (stencil: false + baked corner AO)
- * - Pass 2: Band 0 extruded active DOM blocks ([0..1] front-cap UVs + CSS-craft armor) + Glyph Atlas
- * - Rideable Right-Edge Scrollbar elevator + 1D Y-interval chunk culling
+ * Milestone 3C — Clean Component-Only Floating Website & Breakable Cyber-Vaults:
+ * - Act I (`intact`): Pixel-accurate full-page Band -2 + exact DOM positions for 3.0s (or until first strike).
+ * - Breakup (`fracturing` -> `broken_arena`): Cleanly dissolves Band -2 into dark cosmic space so ONLY
+ *   the real DOM components float around as well-spaced playable islands.
+ * - Break & Enter Cyber-Vaults: Strike any hollow/structural component to crack open a glowing doorway into
+ *   its illuminated Band -1 Miniature Cyber-Vault interior (complete with micro-platforms, collectible
+ *   Data Orbs, and a destructible Core Reactor) where the hero automatically shrinks to 0.38x!
  */
 export class WebsiteWorld {
   public readonly root = new THREE.Group();
   public readonly pageHeightM: number;
+  public readonly expandedPageHeightM: number;
   public readonly isDarkTheme: boolean;
-  public readonly spawnPoint = new THREE.Vector3(-4.5, 0.85, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+  public readonly spawnPoint = new THREE.Vector3(-4.5, 1.0, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+
+  private worldPhase: WorldPhase = 'intact';
+  private fractureCountdown = 3.0;
+  private fractureElapsed = 0;
 
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly materials: THREE.Material[] = [];
   private readonly textures: THREE.Texture[] = [];
-  private readonly chunks: ChunkEntry[] = [];
-  private readonly platformBlocks: PlatformBlock[] = [];
+  private readonly backdropMeshes: Array<{ mesh: THREE.Mesh; mat: THREE.ShaderMaterial; y: number }> = [];
+  private readonly islands: LivingIslandEntry[] = [];
+  private readonly prng: SeededPRNG;
 
-  // Rideable right-edge scrollbar carriage
+  private outerFrameMesh: THREE.Mesh | null = null;
+  private sideFrameMat: THREE.MeshBasicMaterial | null = null;
+  private backdropOpacity = 1.0;
+
+  // Dynamic Boundary Rails & Bottom Catch Deck
+  private bottomDeckMesh: THREE.Mesh | null = null;
+  private bottomDeckBody: RAPIER.RigidBody | null = null;
+  private bottomDeckCollider: RAPIER.Collider | null = null;
+  private readonly intactBottomY: number;
+  private expandedBottomY: number;
+
+  private leftRailBody: RAPIER.RigidBody | null = null;
+  private leftRailCollider: RAPIER.Collider | null = null;
+  private rightRailBody: RAPIER.RigidBody | null = null;
+  private rightRailCollider: RAPIER.Collider | null = null;
+
+  // Rideable Right-Edge Scrollbar Carriage & Rail
+  private scrollbarRailMesh: THREE.Mesh | null = null;
   private scrollbarThumbMesh: THREE.Mesh | null = null;
   private scrollbarCollider: RAPIER.Collider | null = null;
   private scrollbarBody: RAPIER.RigidBody | null = null;
+  private scrollbarX = 9.75;
   private scrollbarY = -1.2;
   private scrollbarDir = -1;
-  private readonly scrollbarX = 9.75;
 
-  private constructor(pageHeightM: number, isDarkTheme: boolean) {
+  // Cyber-Vault progression counters
+  private activeVaultId: string | null = null;
+  private totalVaultCount = 0;
+  private vaultsClearedCount = 0;
+  private dataOrbsCollectedCount = 0;
+  private simTime = 0;
+
+  private constructor(pageHeightM: number, isDarkTheme: boolean, url: string) {
     this.pageHeightM = pageHeightM;
+    this.expandedPageHeightM = pageHeightM * 1.4;
+    this.intactBottomY = -pageHeightM - 0.35;
+    this.expandedBottomY = -this.expandedPageHeightM - 0.85;
     this.isDarkTheme = isDarkTheme;
+    this.prng = new SeededPRNG(`cosmic-web-${url}`);
     this.root.name = 'WebsiteWorld';
+  }
+
+  getWorldPhase(): WorldPhase {
+    return this.worldPhase;
+  }
+
+  getFractureCountdown(): number {
+    return this.fractureCountdown;
+  }
+
+  getTotalVaults(): number {
+    return this.totalVaultCount;
+  }
+
+  getVaultsCleared(): number {
+    return this.vaultsClearedCount;
+  }
+
+  getDataOrbsCollected(): number {
+    return this.dataOrbsCollectedCount;
+  }
+
+  setActiveVaultId(id: string | null): void {
+    this.activeVaultId = id;
+  }
+
+  getActiveArenaHalfWidth(): number {
+    if (this.worldPhase === 'intact') return 10.0;
+    const p = THREE.MathUtils.clamp(this.fractureElapsed / 0.72, 0, 1);
+    return THREE.MathUtils.lerp(10.0, 14.5, p);
+  }
+
+  getActivePageHeightM(): number {
+    if (this.worldPhase === 'intact') return this.pageHeightM;
+    const p = THREE.MathUtils.clamp(this.fractureElapsed / 0.72, 0, 1);
+    return THREE.MathUtils.lerp(this.pageHeightM, this.expandedPageHeightM, p);
+  }
+
+  triggerFracture(impactX: number, impactY: number): boolean {
+    if (this.worldPhase !== 'intact') return false;
+    this.worldPhase = 'fracturing';
+    this.fractureCountdown = 0;
+    this.fractureElapsed = 0;
+
+    for (let i = 0; i < this.islands.length; i++) {
+      const isl = this.islands[i];
+      const dist = Math.hypot(isl.intactX - impactX, isl.intactY - impactY);
+      isl.staggerDelay = THREE.MathUtils.clamp(dist * 0.012, 0, 0.14);
+    }
+
+    return true;
+  }
+
+  private toVaultPortalInfo(isl: LivingIslandEntry): CyberVaultPortal | null {
+    if (!isl.vault) return null;
+    const v = isl.vault;
+    return {
+      id: isl.id,
+      title: v.title,
+      isBreached: v.isBreached,
+      isCoreDestroyed: v.isCoreDestroyed,
+      portalX: isl.curX,
+      portalY: isl.curY,
+      portalHalfW: v.portalHalfW,
+      portalHalfH: v.portalHalfH,
+      chamberCenterX: isl.curX,
+      chamberCenterY: isl.curY,
+      chamberCenterZ: SPATIAL_CONSTANTS.BAND_CHAMBER_CENTER_Z,
+      chamberHalfW: v.chamberW * 0.5,
+      chamberHalfH: v.chamberH * 0.5,
+      exitX: isl.curX + v.exitLocalX,
+      exitY: isl.curY + v.exitLocalY,
+    };
+  }
+
+  getVaultById(id: string): CyberVaultPortal | null {
+    const isl = this.islands.find((item) => item.id === id);
+    return isl ? this.toVaultPortalInfo(isl) : null;
+  }
+
+  /**
+   * Handles hero attacks (Left Click / J):
+   * - If outside: breaches the nearest / aimed Cyber-Vault component, splitting its front cover open
+   *   and illuminating its miniature interior chamber!
+   * - If inside a Cyber-Vault: strikes and shatters the pulsing Vault Data Core Reactor!
+   */
+  handleStrikeAt(
+    hitX: number,
+    hitY: number,
+    heroX: number,
+    heroY: number,
+    inVaultId: string | null,
+  ): VaultInteractionResult {
+    const res: VaultInteractionResult = {
+      breachedVault: null,
+      destroyedCoreVault: null,
+      collectedOrbPos: null,
+      impactX: hitX,
+      impactY: hitY,
+    };
+
+    if (inVaultId) {
+      const isl = this.islands.find((item) => item.id === inVaultId);
+      if (isl && isl.vault && !isl.vault.isCoreDestroyed) {
+        const distToCore = Math.hypot(heroX - isl.curX, heroY - isl.curY);
+        const distAimToCore = Math.hypot(hitX - isl.curX, hitY - isl.curY);
+        if (distToCore < 2.2 || distAimToCore < 1.8) {
+          isl.vault.isCoreDestroyed = true;
+          isl.vault.coreGroup.visible = false;
+          this.vaultsClearedCount++;
+          res.destroyedCoreVault = this.toVaultPortalInfo(isl);
+          res.impactX = isl.curX;
+          res.impactY = isl.curY;
+        }
+      }
+      return res;
+    }
+
+    // Outside: find best vault component near click point OR near hero reach
+    let bestIsl: LivingIslandEntry | null = null;
+    let bestScore = Infinity;
+    for (const isl of this.islands) {
+      if (!isl.vault) continue;
+      const dxClick = Math.abs(hitX - isl.curX);
+      const dyClick = Math.abs(hitY - isl.curY);
+      const insideClick = dxClick <= isl.halfW + 0.65 && dyClick <= isl.visualHalfH + 0.65;
+      const distHero = Math.hypot(heroX - isl.curX, heroY - isl.curY);
+      const nearHero = distHero <= Math.max(isl.halfW, isl.visualHalfH) + 2.4;
+
+      if (insideClick || nearHero) {
+        const score = insideClick
+          ? Math.hypot(dxClick, dyClick) * 0.5
+          : distHero + 1.0;
+        if (score < bestScore) {
+          bestScore = score;
+          bestIsl = isl;
+        }
+      }
+    }
+
+    if (bestIsl && bestIsl.vault && !bestIsl.vault.isBreached) {
+      bestIsl.vault.isBreached = true;
+      bestIsl.vault.vaultGroup.visible = true;
+      bestIsl.vault.frontDoorFrame.visible = true;
+      // Split front cover cleanly into glowing left & right side armor wings around the open portal!
+      bestIsl.frontCoverMesh.visible = false;
+      if (bestIsl.frontWingLeft) bestIsl.frontWingLeft.visible = true;
+      if (bestIsl.frontWingRight) bestIsl.frontWingRight.visible = true;
+
+      res.breachedVault = this.toVaultPortalInfo(bestIsl);
+      res.impactX = bestIsl.curX;
+      res.impactY = bestIsl.curY;
+    }
+
+    return res;
+  }
+
+  findNearestBreachedPortal(heroX: number, heroY: number, maxRange = 3.2): CyberVaultPortal | null {
+    let best: CyberVaultPortal | null = null;
+    let bestDist = maxRange;
+    for (const isl of this.islands) {
+      if (!isl.vault || !isl.vault.isBreached) continue;
+      const dist = Math.hypot(heroX - isl.curX, heroY - isl.curY);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = this.toVaultPortalInfo(isl);
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Checks if hero overlaps a breached portal (outside -> dive inside & shrink)
+   * OR overlaps the vault's Exit Gate Beacon (inside -> pop back out & grow to 1.6x).
+   */
+  findPortalTransition(
+    heroX: number,
+    heroY: number,
+    inVaultId: string | null,
+  ): { action: 'enter' | 'exit'; vault: CyberVaultPortal } | null {
+    if (inVaultId) {
+      const isl = this.islands.find((item) => item.id === inVaultId);
+      if (!isl || !isl.vault) return null;
+      const exitWorldX = isl.curX + isl.vault.exitLocalX;
+      const exitWorldY = isl.curY + isl.vault.exitLocalY;
+      if (Math.hypot(heroX - exitWorldX, heroY - exitWorldY) < 0.78) {
+        const portal = this.toVaultPortalInfo(isl);
+        if (portal) return { action: 'exit', vault: portal };
+      }
+      return null;
+    }
+
+    for (const isl of this.islands) {
+      if (!isl.vault || !isl.vault.isBreached) continue;
+      const dx = Math.abs(heroX - isl.curX);
+      const dy = Math.abs(heroY - isl.curY);
+      if (dx <= isl.vault.portalHalfW + 0.55 && dy <= Math.max(isl.vault.portalHalfH + 0.55, isl.visualHalfH + 0.35)) {
+        const portal = this.toVaultPortalInfo(isl);
+        if (portal) return { action: 'enter', vault: portal };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Collects Data Orbs when shrunk inside an active Cyber-Vault.
+   */
+  collectNearbyOrbs(inVaultId: string, heroX: number, heroY: number): THREE.Vector3 | null {
+    const isl = this.islands.find((item) => item.id === inVaultId);
+    if (!isl || !isl.vault) return null;
+    for (const orb of isl.vault.orbs) {
+      if (orb.collected) continue;
+      const ox = isl.curX + orb.localX;
+      const oy = isl.curY + orb.localY;
+      if (Math.hypot(heroX - ox, heroY - oy) < 0.56) {
+        orb.collected = true;
+        orb.mesh.visible = false;
+        this.dataOrbsCollectedCount++;
+        return new THREE.Vector3(ox, oy, SPATIAL_CONSTANTS.BAND_CHAMBER_CENTER_Z);
+      }
+    }
+    return null;
   }
 
   static async build(
@@ -194,48 +557,77 @@ export class WebsiteWorld {
     isSoftwareGl: boolean,
     maxAnisotropy: number,
   ): Promise<WebsiteWorld> {
-    const world = new WebsiteWorld(analyzed.pageHeightM, analyzed.isDarkTheme);
-    const chunkSizeM = 6.0;
-    const chunkMap = new Map<number, THREE.Group>();
+    const world = new WebsiteWorld(analyzed.pageHeightM, analyzed.isDarkTheme, analyzed.url);
 
-    const getChunk = (yM: number): THREE.Group => {
-      const idx = Math.floor(yM / chunkSizeM);
-      let grp = chunkMap.get(idx);
-      if (!grp) {
-        grp = new THREE.Group();
-        world.root.add(grp);
-        chunkMap.set(idx, grp);
-        world.chunks.push({
-          minY: idx * chunkSizeM,
-          maxY: (idx + 1) * chunkSizeM,
-          group: grp,
-        });
-      }
-      return grp;
-    };
+    const circuitTex = createCyberCircuitTexture();
+    world.textures.push(circuitTex);
 
-    const cornerAoTex = createCornerAoTexture();
-    world.textures.push(cornerAoTex);
-
-    const sideFrameMat = new THREE.MeshBasicMaterial({
+    world.sideFrameMat = new THREE.MeshBasicMaterial({
       color: analyzed.isDarkTheme ? 0x09090b : 0x11131a,
+      transparent: true,
+      opacity: 1.0,
       toneMapped: false,
     });
     const chamberWallMat = new THREE.MeshStandardMaterial({
-      map: cornerAoTex,
-      roughness: 0.86,
-      metalness: 0.08,
+      map: circuitTex,
+      roughness: 0.55,
+      metalness: 0.25,
+      emissive: 0x0e7490,
+      emissiveIntensity: 0.68,
     });
-    const relicCrateMat = new THREE.MeshStandardMaterial({
-      color: 0xcbd5e1,
+    const innerShelfMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
       roughness: 0.28,
-      metalness: 0.78,
+      metalness: 0.72,
+      emissive: 0x22d3ee,
+      emissiveIntensity: 0.55,
     });
-    world.materials.push(sideFrameMat, chamberWallMat, relicCrateMat);
+    const portalFrameMat = new THREE.MeshBasicMaterial({
+      color: 0x22d3ee,
+      transparent: true,
+      opacity: 0.9,
+      toneMapped: false,
+    });
+    const exitBeaconMat = new THREE.MeshBasicMaterial({
+      color: 0xf59e0b,
+      transparent: true,
+      opacity: 0.92,
+      toneMapped: false,
+    });
+    const orbMat = new THREE.MeshStandardMaterial({
+      color: 0xfef08a,
+      emissive: 0xf59e0b,
+      emissiveIntensity: 1.85,
+      roughness: 0.15,
+      metalness: 0.65,
+    });
+    const coreMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x06b6d4,
+      emissiveIntensity: 2.1,
+      roughness: 0.18,
+      metalness: 0.85,
+    });
+    const coreRingMat = new THREE.MeshBasicMaterial({
+      color: 0xf59e0b,
+      transparent: true,
+      opacity: 0.88,
+      toneMapped: false,
+    });
+    world.materials.push(
+      world.sideFrameMat,
+      chamberWallMat,
+      innerShelfMat,
+      portalFrameMat,
+      exitBeaconMat,
+      orbMat,
+      coreMat,
+      coreRingMat,
+    );
 
     // -----------------------------------------------------------------------
-    // PASS 0: Band -2 Full-Page Tiles -> DataArrayTexture (toneMapped: false)
-    // Captures the complete, pristine, unedited website onto backdrop tiles
+    // PASS 0: Band -2 Full-Page Tiles (100% Intact in Act I, dissolves cleanly
+    // into pure Cosmic Space on Break so ONLY real DOM components float!)
     // -----------------------------------------------------------------------
     const tileLogicalH = 1024;
     const sliceCount = Math.max(
@@ -298,50 +690,48 @@ export class WebsiteWorld {
     tileArrayTex.needsUpdate = true;
     world.textures.push(tileArrayTex);
 
-    const craterUniforms: THREE.Vector4[] = [];
-    for (let i = 0; i < 48; i++) craterUniforms.push(new THREE.Vector4(0, 0, 0, 0));
+    const tileWorldH = tileLogicalH * SPATIAL_CONSTANTS.WORLD_SCALE;
+    const planeGeo = new THREE.PlaneGeometry(SPATIAL_CONSTANTS.WORLD_WIDTH_M, tileWorldH);
+    world.geometries.push(planeGeo);
 
-    const backdropArrayMat = new THREE.ShaderMaterial({
-      glslVersion: THREE.GLSL3,
-      vertexShader: BACKDROP_VERTEX_SHADER,
-      fragmentShader: BACKDROP_FRAGMENT_SHADER,
-      uniforms: {
-        uTileArray: { value: tileArrayTex },
-        uTileCount: { value: sliceCount },
-        uCraters: { value: craterUniforms },
-      },
-      toneMapped: false,
-    });
-    world.materials.push(backdropArrayMat);
-
-    // Build vertical strip quads (each 20.0m wide x 16.0m tall) for Band -2 in one batched geometry
-    const tileWorldH = tileLogicalH * SPATIAL_CONSTANTS.WORLD_SCALE; // 16.0m per 1024px slice
     for (let s = 0; s < sliceCount; s++) {
-      const quadGeo = new THREE.PlaneGeometry(SPATIAL_CONSTANTS.WORLD_WIDTH_M, tileWorldH);
-      const vCount = quadGeo.getAttribute('position').count;
-      const layers = new Float32Array(vCount);
-      layers.fill(s);
-      quadGeo.setAttribute('aLayer', new THREE.BufferAttribute(layers, 1));
-      world.geometries.push(quadGeo);
-
       const sliceCenterY = -(s * tileWorldH + tileWorldH * 0.5);
-      const tileMesh = new THREE.Mesh(quadGeo, backdropArrayMat);
-      tileMesh.position.set(0, sliceCenterY, SPATIAL_CONSTANTS.BAND_BACKDROP_Z);
-      tileMesh.renderOrder = RENDER_ORDER.OPAQUE_WORLD;
-      getChunk(sliceCenterY).add(tileMesh);
+      const mat = new THREE.ShaderMaterial({
+        glslVersion: THREE.GLSL3,
+        vertexShader: BACKDROP_VERTEX_SHADER,
+        fragmentShader: BACKDROP_FRAGMENT_SHADER,
+        uniforms: {
+          uTileArray: { value: tileArrayTex },
+          uTileCount: { value: sliceCount },
+          uLayerIndex: { value: s },
+          uOpacity: { value: 1.0 },
+        },
+        transparent: true,
+        toneMapped: false,
+      });
+      world.materials.push(mat);
+
+      const mesh = new THREE.Mesh(planeGeo, mat);
+      mesh.position.set(0, sliceCenterY, SPATIAL_CONSTANTS.BAND_BACKDROP_Z);
+      mesh.renderOrder = RENDER_ORDER.OPAQUE_WORLD;
+      world.root.add(mesh);
+      world.backdropMeshes.push({ mesh, mat, y: sliceCenterY });
     }
 
-    // Surrounding Obsidian Outer Stage Sheet (prevents raw viewport black gap on wide/angled views)
     const stageTotalH = Math.max(28, analyzed.pageHeightM + 20);
     const outerFrameGeo = new THREE.PlaneGeometry(56.0, stageTotalH);
     world.geometries.push(outerFrameGeo);
-    const outerFrameMesh = new THREE.Mesh(outerFrameGeo, sideFrameMat);
-    outerFrameMesh.position.set(0, -analyzed.pageHeightM * 0.5, SPATIAL_CONSTANTS.BAND_BACKDROP_Z - 0.08);
-    outerFrameMesh.renderOrder = RENDER_ORDER.OPAQUE_WORLD;
-    world.root.add(outerFrameMesh);
+    world.outerFrameMesh = new THREE.Mesh(outerFrameGeo, world.sideFrameMat);
+    world.outerFrameMesh.position.set(
+      0,
+      -analyzed.pageHeightM * 0.5,
+      SPATIAL_CONSTANTS.BAND_BACKDROP_Z - 0.14,
+    );
+    world.outerFrameMesh.renderOrder = RENDER_ORDER.OPAQUE_WORLD;
+    world.root.add(world.outerFrameMesh);
 
     // -----------------------------------------------------------------------
-    // PASS 1 & PASS 2: Band -1 Hollow Card Chambers + Band 0 DOM Components
+    // PASS 1 & 2: Floating DOM Components + Break-and-Enter Cyber-Vaults
     // -----------------------------------------------------------------------
     const tierMaterials = new Map<string, THREE.MeshStandardMaterial>();
     const getArmorMat = (comp: ExtractedDomComponent): THREE.MeshStandardMaterial => {
@@ -354,7 +744,7 @@ export class WebsiteWorld {
           roughness: isHighTier ? 0.28 : 0.72,
           metalness: isHighTier ? 0.78 : 0.18,
           emissive: tierToAccentColor(comp.tier),
-          emissiveIntensity: isHighTier ? 0.08 : 0.02,
+          emissiveIntensity: isHighTier ? 0.14 : 0.05,
         });
         tierMaterials.set(key, mat);
         world.materials.push(mat);
@@ -363,23 +753,43 @@ export class WebsiteWorld {
     };
 
     const rimMat = new THREE.MeshBasicMaterial({
-      color: analyzed.isDarkTheme ? 0x38bdf8 : 0x0f172a,
+      color: analyzed.isDarkTheme ? 0x38bdf8 : 0xf59e0b,
       side: THREE.BackSide,
       transparent: true,
-      opacity: analyzed.isDarkTheme ? 0.28 : 0.14,
+      opacity: analyzed.isDarkTheme ? 0.34 : 0.22,
     });
     world.materials.push(rimMat);
 
-    // Capture up to 36 foreground DOM components with crisp [0..1] snapdom front textures
+    // Shared geometries for Cyber-Vault collectibles, core, and portal trims
+    const orbGeo = new THREE.OctahedronGeometry(0.14, 0);
+    const coreGeo = new THREE.IcosahedronGeometry(0.26, 0);
+    const coreRingGeo = new THREE.TorusGeometry(0.36, 0.032, 8, 24);
+    const exitRingGeo = new THREE.TorusGeometry(0.28, 0.035, 8, 20);
+    world.geometries.push(orbGeo, coreGeo, coreRingGeo, exitRingGeo);
+
     const activeComps = analyzed.components.slice(0, 36);
-    const prng = new SeededPRNG(`world-${analyzed.url}`);
-    let hollowCardCount = 0;
+    let vaultCount = 0;
 
     for (let i = 0; i < activeComps.length; i++) {
       const comp = activeComps[i];
-      const chunkGrp = getChunk(comp.y);
 
-      // Capture exact DOM look for component front cap
+      let resolvedBgCss = analyzed.pageBgCss;
+      const docWin = analyzed.doc.defaultView;
+      if (docWin) {
+        let cur: Element | null = comp.element;
+        while (cur) {
+          const bg = docWin.getComputedStyle(cur).backgroundColor;
+          if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') {
+            const alphaMatch = bg.match(/rgba\([^)]+,\s*([\d.]+)\s*\)/i);
+            if (!alphaMatch || Number(alphaMatch[1]) > 0.2) {
+              resolvedBgCss = bg;
+              break;
+            }
+          }
+          cur = cur.parentElement;
+        }
+      }
+
       let compTex: THREE.CanvasTexture | null = null;
       try {
         const snapCanvas = await snapdom.toCanvas(comp.element, {
@@ -390,7 +800,16 @@ export class WebsiteWorld {
           useProxy: '/api/proxy-asset?url=',
         });
         if (snapCanvas && snapCanvas.width > 0 && snapCanvas.height > 0) {
-          compTex = new THREE.CanvasTexture(snapCanvas);
+          const compCanvas = document.createElement('canvas');
+          compCanvas.width = snapCanvas.width;
+          compCanvas.height = snapCanvas.height;
+          const cctx = compCanvas.getContext('2d');
+          if (cctx) {
+            cctx.fillStyle = resolvedBgCss;
+            cctx.fillRect(0, 0, compCanvas.width, compCanvas.height);
+            cctx.drawImage(snapCanvas, 0, 0);
+          }
+          compTex = new THREE.CanvasTexture(cctx ? compCanvas : snapCanvas);
           compTex.colorSpace = THREE.SRGBColorSpace;
           compTex.anisotropy = maxAnisotropy;
           compTex.minFilter = THREE.LinearFilter;
@@ -410,18 +829,29 @@ export class WebsiteWorld {
             roughness: 0.35,
             metalness: 0.45,
             transparent: true,
-            opacity: 0.14,
+            opacity: 0.24,
           });
       world.materials.push(frontMat);
 
-      // Extruded thickness scales cleanly with 4-decade C_score
-      const depthM = THREE.MathUtils.clamp(0.24 + comp.craft.cScore * 0.045, 0.26, 0.52);
+      const isInteractiveWidget =
+        comp.tagName === 'button' ||
+        comp.tagName === 'a' ||
+        comp.tagName === 'input' ||
+        comp.tagName === 'select';
+
+      const depthM = isInteractiveWidget
+        ? 0.11
+        : THREE.MathUtils.clamp(0.18 + comp.craft.cScore * 0.03, 0.2, 0.3);
+      const meshZ = isInteractiveWidget
+        ? SPATIAL_CONSTANTS.BAND_PLAY_Z - 0.18
+        : SPATIAL_CONSTANTS.BAND_PLAY_Z - 0.3;
+
       const shape = createRoundedRectShape(comp.w, comp.h, Math.min(0.12, comp.h * 0.22));
       const extGeo = new THREE.ExtrudeGeometry(shape, {
         depth: depthM,
         bevelEnabled: true,
-        bevelThickness: 0.02,
-        bevelSize: 0.018,
+        bevelThickness: 0.016,
+        bevelSize: 0.014,
         bevelSegments: 2,
       });
       extGeo.translate(0, 0, -depthM * 0.5);
@@ -429,195 +859,459 @@ export class WebsiteWorld {
       normalizeExtrudeCapUvs(extGeo, comp.w, comp.h);
       world.geometries.push(extGeo);
 
+      const islandGrp = new THREE.Group();
+      islandGrp.position.set(comp.x, comp.y, meshZ);
+      world.root.add(islandGrp);
+
       const compMesh = new THREE.Mesh(extGeo, [frontMat, armorMat]);
-      compMesh.position.set(comp.x, comp.y, SPATIAL_CONSTANTS.BAND_PLAY_Z);
       compMesh.castShadow = !isSoftwareGl;
       compMesh.receiveShadow = true;
       compMesh.renderOrder = RENDER_ORDER.OPAQUE_WORLD;
-      chunkGrp.add(compMesh);
+      islandGrp.add(compMesh);
 
-      if (analyzed.isDarkTheme) {
-        const rimMesh = new THREE.Mesh(extGeo, rimMat);
-        rimMesh.position.copy(compMesh.position);
-        rimMesh.scale.set(1.018, 1.03, 1.04);
-        chunkGrp.add(rimMesh);
-      }
+      const rimMesh = new THREE.Mesh(extGeo, rimMat);
+      rimMesh.scale.set(1.006, 1.012, 1.02);
+      islandGrp.add(rimMesh);
 
-      // Pass 1: Bounded Hollow Card Room on Band -1 behind major cards
-      if (comp.isHollowCard && hollowCardCount < 14) {
-        hollowCardCount++;
-        const cw = Math.max(1.5, comp.w - 0.16);
-        const ch = Math.max(1.0, comp.h - 0.16);
-        const wallThick = 0.12;
-        const roomDepth = 1.62;
-        const roomCenterZ = SPATIAL_CONSTANTS.BAND_CHAMBER_CENTER_Z;
-
-        const backGeo = new THREE.BoxGeometry(cw, ch, 0.1);
-        const sideGeo = new THREE.BoxGeometry(wallThick, ch, roomDepth);
-        const tbGeo = new THREE.BoxGeometry(cw, wallThick, roomDepth);
-        const crateGeo = new THREE.BoxGeometry(
-          Math.min(0.65, cw * 0.22),
-          Math.min(0.55, ch * 0.3),
-          0.55,
-        );
-        world.geometries.push(backGeo, sideGeo, tbGeo, crateGeo);
-
-        const roomGrp = new THREE.Group();
-        roomGrp.position.set(comp.x, comp.y, 0);
-
-        const backWall = new THREE.Mesh(backGeo, chamberWallMat);
-        backWall.position.set(0, 0, SPATIAL_CONSTANTS.BAND_CHAMBER_BACK_Z);
-        const lWall = new THREE.Mesh(sideGeo, chamberWallMat);
-        lWall.position.set(-cw * 0.5 + wallThick * 0.5, 0, roomCenterZ);
-        const rWall = new THREE.Mesh(sideGeo, chamberWallMat);
-        rWall.position.set(cw * 0.5 - wallThick * 0.5, 0, roomCenterZ);
-        const fWall = new THREE.Mesh(tbGeo, chamberWallMat);
-        fWall.position.set(0, -ch * 0.5 + wallThick * 0.5, roomCenterZ);
-        const cWall = new THREE.Mesh(tbGeo, chamberWallMat);
-        cWall.position.set(0, ch * 0.5 - wallThick * 0.5, roomCenterZ);
-
-        const crate = new THREE.Mesh(crateGeo, relicCrateMat);
-        crate.position.set(
-          prng.range(-cw * 0.22, cw * 0.22),
-          -ch * 0.5 + wallThick + Math.min(0.28, ch * 0.15),
-          roomCenterZ,
-        );
-        roomGrp.add(backWall, lWall, rWall, fWall, cWall, crate);
-        chunkGrp.add(roomGrp);
-      }
-
-      // Register walkable physics collider cleanly:
-      // Every website component gets a walkable top shelf, registered with COLLISION_GROUP.CARD_SHELL!
-      // This enables universal one-way drop-through: player can stand on it, jump through from below,
-      // and drop down through it by pressing S / Crouch!
+      // Register exterior walkable physics shelf (Band 0)
       const isShelf = comp.h > 0.32;
       const physY = isShelf ? comp.y + comp.h * 0.5 - 0.05 : comp.y;
       const physHalfH = isShelf ? 0.05 : Math.max(0.04, comp.h * 0.5);
+      const halfW = Math.max(0.2, comp.w * 0.5 - 0.02);
 
       const block: PlatformBlock = {
         id: comp.id,
         x: comp.x,
         y: physY,
         z: SPATIAL_CONSTANTS.BAND_PLAY_Z,
-        halfW: Math.max(0.2, comp.w * 0.5 - 0.02),
+        halfW,
         halfH: physHalfH,
         halfD: 0.55,
         grabbableCorners: true,
       };
-      world.platformBlocks.push(block);
-      physics.addStaticPlatform(block, COLLISION_GROUP.CARD_SHELL);
-    }
+      const kinShelf = physics.createKinematicPlatform(
+        block.x,
+        block.y,
+        block.z,
+        block.halfW,
+        block.halfH,
+        block.halfD,
+        COLLISION_GROUP.CARD_SHELL,
+        block,
+      );
 
-    // -----------------------------------------------------------------------
-    // Pooled Glyph Atlas (TreeWalker Range.getClientRects cutout layer)
-    // -----------------------------------------------------------------------
-    if (analyzed.words.length > 0) {
-      const atlasSize = 1024;
-      const cellCols = 8;
-      const cellRows = 12;
-      const cellW = atlasSize / cellCols; // 128px
-      const cellH = atlasSize / cellRows; // ~85px
-      const atlasCanvas = document.createElement('canvas');
-      atlasCanvas.width = atlasSize;
-      atlasCanvas.height = atlasSize;
-      const actx = atlasCanvas.getContext('2d');
+      // Build Break-and-Enter Miniature Cyber-Vault inside cards/sections/panels!
+      const canHouseVault =
+        (comp.isHollowCard || comp.w >= 2.2) && comp.h >= 0.95 && vaultCount < 12;
 
-      if (actx) {
-        actx.clearRect(0, 0, atlasSize, atlasSize);
-        const packedWords = analyzed.words.slice(0, cellCols * cellRows);
-        for (let i = 0; i < packedWords.length; i++) {
-          const w = packedWords[i];
-          const col = i % cellCols;
-          const row = Math.floor(i / cellCols);
-          actx.save();
-          actx.beginPath();
-          actx.rect(col * cellW + 2, row * cellH + 2, cellW - 4, cellH - 4);
-          actx.clip();
-          actx.fillStyle = w.color || '#ffffff';
-          actx.font = '700 22px "Plus Jakarta Sans", sans-serif';
-          actx.textAlign = 'center';
-          actx.textBaseline = 'middle';
-          actx.fillText(w.text.slice(0, 12), col * cellW + cellW * 0.5, row * cellH + cellH * 0.5);
-          actx.restore();
+      let frontWingLeft: THREE.Mesh | null = null;
+      let frontWingRight: THREE.Mesh | null = null;
+      let vaultData: CyberVaultData | null = null;
+
+      if (canHouseVault) {
+        vaultCount++;
+        const vw = THREE.MathUtils.clamp(comp.w * 0.9, 3.0, 7.6);
+        const vh = THREE.MathUtils.clamp(Math.max(comp.h * 0.92, 2.25), 2.25, 4.2);
+        const portalHalfW = Math.min(0.85, vw * 0.24);
+        const portalHalfH = Math.min(0.72, vh * 0.32);
+
+        // Split side armor wings revealed when the front shell is cracked open
+        const wingW = Math.max(0.45, comp.w * 0.5 - portalHalfW - 0.05);
+        const wingGeo = new THREE.BoxGeometry(wingW, comp.h * 0.92, depthM);
+        world.geometries.push(wingGeo);
+        frontWingLeft = new THREE.Mesh(wingGeo, armorMat);
+        frontWingLeft.position.set(-portalHalfW - wingW * 0.5, 0, 0);
+        frontWingLeft.visible = false;
+
+        frontWingRight = new THREE.Mesh(wingGeo, armorMat);
+        frontWingRight.position.set(portalHalfW + wingW * 0.5, 0, 0);
+        frontWingRight.visible = false;
+        islandGrp.add(frontWingLeft, frontWingRight);
+
+        // Glowing doorway rim frame when breached
+        const doorFrameGeo = new THREE.RingGeometry(
+          Math.min(portalHalfW, portalHalfH) * 0.85,
+          Math.min(portalHalfW, portalHalfH) * 1.05,
+          24,
+        );
+        world.geometries.push(doorFrameGeo);
+        const frontDoorFrame = new THREE.Mesh(doorFrameGeo, portalFrameMat);
+        frontDoorFrame.position.set(0, 0, depthM * 0.5 + 0.05);
+        frontDoorFrame.visible = false;
+        frontDoorFrame.renderOrder = RENDER_ORDER.ADDITIVE_VFX_LIGHTNING;
+        islandGrp.add(frontDoorFrame);
+
+        // Illuminated Band -1 Cyber-Vault Chamber Group
+        const localRoomZ = SPATIAL_CONSTANTS.BAND_CHAMBER_CENTER_Z - meshZ;
+        const vaultGroup = new THREE.Group();
+        vaultGroup.position.set(0, 0, localRoomZ);
+        vaultGroup.visible = false; // Revealed cleanly when component shell breaks open!
+        islandGrp.add(vaultGroup);
+
+        const wallThick = 0.14;
+        const roomDepth = 1.65;
+        const backGeo = new THREE.BoxGeometry(vw, vh, 0.12);
+        const sideGeo = new THREE.BoxGeometry(wallThick, vh, roomDepth);
+        const tbGeo = new THREE.BoxGeometry(vw, wallThick, roomDepth);
+        const pillarGeo = new THREE.BoxGeometry(0.18, vh - 0.3, 0.18);
+        const microShelfGeo = new THREE.BoxGeometry(vw * 0.3, 0.1, 1.05);
+        world.geometries.push(backGeo, sideGeo, tbGeo, pillarGeo, microShelfGeo);
+
+        const backPlate = new THREE.Mesh(backGeo, chamberWallMat);
+        backPlate.position.set(0, 0, -roomDepth * 0.5);
+
+        const lWall = new THREE.Mesh(sideGeo, chamberWallMat);
+        lWall.position.set(-vw * 0.5 + wallThick * 0.5, 0, 0);
+
+        const rWall = new THREE.Mesh(sideGeo, chamberWallMat);
+        rWall.position.set(vw * 0.5 - wallThick * 0.5, 0, 0);
+
+        const floorSlab = new THREE.Mesh(tbGeo, chamberWallMat);
+        floorSlab.position.set(0, -vh * 0.5 + wallThick * 0.5, 0);
+
+        const ceilSlab = new THREE.Mesh(tbGeo, chamberWallMat);
+        ceilSlab.position.set(0, vh * 0.5 - wallThick * 0.5, 0);
+
+        const pillarL = new THREE.Mesh(pillarGeo, innerShelfMat);
+        pillarL.position.set(-vw * 0.34, 0, -0.45);
+        const pillarR = new THREE.Mesh(pillarGeo, innerShelfMat);
+        pillarR.position.set(vw * 0.34, 0, -0.45);
+
+        // 2 Micro-Platforms inside the Cyber-Vault
+        const shelfLeftX = -vw * 0.26;
+        const shelfLeftY = -vh * 0.12;
+        const shelfRightX = vw * 0.26;
+        const shelfRightY = vh * 0.08;
+
+        const microShelfL = new THREE.Mesh(microShelfGeo, innerShelfMat);
+        microShelfL.position.set(shelfLeftX, shelfLeftY, 0);
+        const microShelfR = new THREE.Mesh(microShelfGeo, innerShelfMat);
+        microShelfR.position.set(shelfRightX, shelfRightY, 0);
+
+        // Exit Gate Beacon on lower-right floor of vault
+        const exitLocalX = vw * 0.32;
+        const exitLocalY = -vh * 0.5 + wallThick + 0.32;
+        const exitBeaconMesh = new THREE.Mesh(exitRingGeo, exitBeaconMat);
+        exitBeaconMesh.position.set(exitLocalX, exitLocalY, 0.22);
+        exitBeaconMesh.renderOrder = RENDER_ORDER.ADDITIVE_VFX_LIGHTNING;
+
+        // Central Vault Data Core Reactor
+        const coreGroup = new THREE.Group();
+        coreGroup.position.set(0, 0.05, -0.1);
+        const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+        const coreGyroRing = new THREE.Mesh(coreRingGeo, coreRingMat);
+        coreGroup.add(coreMesh, coreGyroRing);
+
+        // 3 Collectible Data Orbs inside vault
+        const orbOffsets: Array<[number, number]> = [
+          [shelfLeftX, shelfLeftY + 0.35],
+          [0, vh * 0.3],
+          [shelfRightX, shelfRightY + 0.35],
+        ];
+        const orbs: DataOrbPickup[] = [];
+        for (let k = 0; k < orbOffsets.length; k++) {
+          const [ox, oy] = orbOffsets[k];
+          const orbMesh = new THREE.Mesh(orbGeo, orbMat);
+          orbMesh.position.set(ox, oy, 0);
+          orbMesh.renderOrder = RENDER_ORDER.CHARACTER_AND_SHARDS;
+          vaultGroup.add(orbMesh);
+          orbs.push({
+            mesh: orbMesh,
+            localX: ox,
+            localY: oy,
+            collected: false,
+            phase: k * 1.9,
+          });
         }
 
-        const atlasTex = new THREE.CanvasTexture(atlasCanvas);
-        atlasTex.colorSpace = THREE.SRGBColorSpace;
-        atlasTex.anisotropy = maxAnisotropy;
-        atlasTex.needsUpdate = true;
-        world.textures.push(atlasTex);
+        vaultGroup.add(
+          backPlate,
+          lWall,
+          rWall,
+          floorSlab,
+          ceilSlab,
+          pillarL,
+          pillarR,
+          microShelfL,
+          microShelfR,
+          exitBeaconMesh,
+          coreGroup,
+        );
 
-        const atlasMat = new THREE.MeshBasicMaterial({
-          map: atlasTex,
-          alphaTest: 0.45,
-          alphaToCoverage: true,
-          transparent: false,
-          toneMapped: false,
-        });
-        world.materials.push(atlasMat);
+        // Register Real Rapier Interior Colliders (CARD_INTERIOR, hidden from outside, active inside!)
+        const interiorColliders: InteriorKinematicCollider[] = [];
+        const addInteriorCol = (
+          lx: number,
+          ly: number,
+          hw: number,
+          hh: number,
+          oneWay: boolean,
+        ) => {
+          const kin = physics.createKinematicPlatform(
+            comp.x + lx,
+            comp.y + ly,
+            SPATIAL_CONSTANTS.BAND_CHAMBER_CENTER_Z,
+            hw,
+            hh,
+            0.75,
+            COLLISION_GROUP.CARD_INTERIOR,
+            undefined,
+            oneWay,
+          );
+          interiorColliders.push({
+            body: kin.body,
+            collider: kin.collider,
+            localX: lx,
+            localY: ly,
+            localZ: 0,
+          });
+        };
 
-        // Keep an invisible/subtle cutout glyph badge strip ready on header margin
-        const badgeGeo = new THREE.PlaneGeometry(0.01, 0.01);
-        world.geometries.push(badgeGeo);
-        const glyphAnchor = new THREE.Mesh(badgeGeo, atlasMat);
-        glyphAnchor.visible = false;
-        world.root.add(glyphAnchor);
+        // Floor, ceiling, left wall, right wall (solid interior walls)
+        addInteriorCol(0, -vh * 0.5 + wallThick * 0.5, vw * 0.5, wallThick * 0.5, false);
+        addInteriorCol(0, vh * 0.5 - wallThick * 0.5, vw * 0.5, wallThick * 0.5, false);
+        addInteriorCol(-vw * 0.5 + wallThick * 0.5, 0, wallThick * 0.5, vh * 0.5, false);
+        addInteriorCol(vw * 0.5 - wallThick * 0.5, 0, wallThick * 0.5, vh * 0.5, false);
+        // Two one-way micro stepping ledges inside vault
+        addInteriorCol(shelfLeftX, shelfLeftY, vw * 0.15, 0.05, true);
+        addInteriorCol(shelfRightX, shelfRightY, vw * 0.15, 0.05, true);
+
+        const cleanTitle =
+          comp.labelText.trim().slice(0, 26) || `Cyber-Vault ${vaultCount}`;
+        vaultData = {
+          title: cleanTitle,
+          vaultGroup,
+          frontDoorFrame,
+          exitBeaconMesh,
+          coreGroup,
+          coreGyroRing,
+          coreMesh,
+          orbs,
+          interiorColliders,
+          chamberW: vw,
+          chamberH: vh,
+          portalHalfW,
+          portalHalfH,
+          exitLocalX,
+          exitLocalY,
+          isBreached: false,
+          isCoreDestroyed: false,
+        };
+      }
+
+      // Compute spaced floating target coordinates (width-weighted so wide banners stay framed!)
+      const widthWeight = THREE.MathUtils.clamp(1 - halfW / 7.5, 0.12, 1.0);
+      const centerJitter =
+        (Math.abs(comp.x) < 1.35
+          ? (i % 2 === 0 ? -1 : 1) * world.prng.range(1.6, 3.2)
+          : comp.x * 0.45) * widthWeight;
+      const maxCenter = Math.max(0.3, (halfW > 6.5 ? 12.4 : 13.7) - halfW);
+      const initBrokenX = THREE.MathUtils.clamp(comp.x + centerJitter, -maxCenter, maxCenter);
+      const rowVertStagger = isInteractiveWidget ? (i % 3) * 0.65 : 0;
+      const initBrokenY = Math.min(-0.85, comp.y * 1.44 - 0.55 - rowVertStagger);
+
+      world.islands.push({
+        id: comp.id,
+        group: islandGrp,
+        frontCoverMesh: compMesh,
+        frontWingLeft,
+        frontWingRight,
+        body: kinShelf.body,
+        collider: kinShelf.collider,
+        block,
+        intactX: comp.x,
+        intactY: comp.y,
+        intactZ: meshZ,
+        intactPhysY: physY,
+        curX: comp.x,
+        curY: comp.y,
+        curZ: meshZ,
+        brokenX: initBrokenX,
+        brokenY: initBrokenY,
+        brokenZ: meshZ - world.prng.range(0.06, 0.22),
+        brokenPhysY: isShelf ? initBrokenY + comp.h * 0.5 - 0.05 : initBrokenY,
+        brokenRotY: 0,
+        brokenRotZ: world.prng.range(-0.035, 0.035) * Math.max(0.3, widthWeight),
+        halfW,
+        visualHalfH: comp.h * 0.5,
+        hoverAmp: world.prng.range(0.06, 0.14),
+        hoverFreq: world.prng.range(1.05, 1.65),
+        hoverPhase: world.prng.range(0, Math.PI * 2),
+        staggerDelay: 0,
+        vault: vaultData,
+      });
+    }
+
+    world.totalVaultCount = vaultCount;
+
+    // -----------------------------------------------------------------------
+    // 2D Box-Relaxation Solver (wide, clean air lanes between components)
+    // -----------------------------------------------------------------------
+    const padX = 1.15;
+    const padY = 1.45;
+    for (let iter = 0; iter < 8; iter++) {
+      for (let i = 0; i < world.islands.length; i++) {
+        for (let j = i + 1; j < world.islands.length; j++) {
+          const a = world.islands[i];
+          const b = world.islands[j];
+          const dx = b.brokenX - a.brokenX;
+          const dy = b.brokenY - a.brokenY;
+          const overlapX = a.halfW + b.halfW + padX - Math.abs(dx);
+          const overlapY = a.visualHalfH + b.visualHalfH + padY - Math.abs(dy);
+          if (overlapX > 0 && overlapY > 0) {
+            if (overlapX < overlapY * 1.15 && a.halfW + b.halfW < 18.0) {
+              const pushDir = dx >= 0 ? 1 : -1;
+              const shift = overlapX * 0.52;
+              a.brokenX -= pushDir * shift;
+              b.brokenX += pushDir * shift;
+            } else {
+              const pushDir = dy >= 0 ? 1 : -1;
+              const shift = overlapY * 0.52;
+              a.brokenY -= pushDir * shift;
+              b.brokenY += pushDir * shift;
+            }
+            const limA = Math.max(0.3, (a.halfW > 6.5 ? 12.4 : 13.7) - a.halfW);
+            const limB = Math.max(0.3, (b.halfW > 6.5 ? 12.4 : 13.7) - b.halfW);
+            a.brokenX = THREE.MathUtils.clamp(a.brokenX, -limA, limA);
+            b.brokenX = THREE.MathUtils.clamp(b.brokenX, -limB, limB);
+            if (a.brokenY > -0.85) {
+              const excess = a.brokenY - -0.85;
+              a.brokenY = -0.85;
+              b.brokenY -= excess;
+            }
+            if (b.brokenY > -0.85) {
+              const excess = b.brokenY - -0.85;
+              b.brokenY = -0.85;
+              a.brokenY -= excess;
+            }
+          }
+        }
       }
     }
 
+    let lowestExpandedY = -analyzed.pageHeightM;
+    for (const isl of world.islands) {
+      const isShelf = isl.visualHalfH > 0.16;
+      isl.brokenPhysY = isShelf ? isl.brokenY + isl.visualHalfH - 0.05 : isl.brokenY;
+      lowestExpandedY = Math.min(lowestExpandedY, isl.brokenY - isl.visualHalfH);
+    }
+    world.expandedBottomY = Math.min(-analyzed.pageHeightM * 1.38 - 0.8, lowestExpandedY - 1.5);
+    Object.assign(world, { expandedPageHeightM: Math.abs(world.expandedBottomY) });
+
     // -----------------------------------------------------------------------
-    // Guaranteed Top Landing Shelf & Full-Width Page Bottom Catch Deck
+    // Dynamic Side Rails & Page Bottom Catch Deck
     // -----------------------------------------------------------------------
-    const bottomFloorY = -analyzed.pageHeightM - 0.35;
-    const bottomDeckGeo = new THREE.BoxGeometry(SPATIAL_CONSTANTS.WORLD_WIDTH_M + 1.2, 0.6, 1.4);
+    const bottomDeckGeo = new THREE.BoxGeometry(31.2, 0.6, 1.4);
     const bottomDeckMat = new THREE.MeshStandardMaterial({
       color: 0x18181f,
-      roughness: 0.72,
-      metalness: 0.25,
+      roughness: 0.65,
+      metalness: 0.35,
+      emissive: 0x082f49,
+      emissiveIntensity: 0.22,
     });
     world.geometries.push(bottomDeckGeo);
     world.materials.push(bottomDeckMat);
 
     const bottomMesh = new THREE.Mesh(bottomDeckGeo, bottomDeckMat);
-    bottomMesh.position.set(0, bottomFloorY, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+    bottomMesh.position.set(0, world.intactBottomY, SPATIAL_CONSTANTS.BAND_PLAY_Z);
     bottomMesh.receiveShadow = true;
     world.root.add(bottomMesh);
+    world.bottomDeckMesh = bottomMesh;
 
-    const bottomBlock: PlatformBlock = {
-      id: 'page-bottom-deck',
-      x: 0,
-      y: bottomFloorY,
-      z: SPATIAL_CONSTANTS.BAND_PLAY_Z,
-      halfW: SPATIAL_CONSTANTS.WORLD_WIDTH_M * 0.5 + 0.6,
-      halfH: 0.3,
-      halfD: 0.75,
-      grabbableCorners: true,
+    const bottomKin = physics.createKinematicPlatform(
+      0,
+      world.intactBottomY,
+      SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      15.6,
+      0.3,
+      0.75,
+      COLLISION_GROUP.TERRAIN,
+    );
+    world.bottomDeckBody = bottomKin.body;
+    world.bottomDeckCollider = bottomKin.collider;
+
+    const sideWallH = world.expandedPageHeightM + 14.0;
+    const sideWallCenterY = -world.expandedPageHeightM * 0.5 + 3.0;
+    const leftKin = physics.createKinematicPlatform(
+      -10.38,
+      sideWallCenterY,
+      SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      0.3,
+      sideWallH * 0.5,
+      0.85,
+      COLLISION_GROUP.TERRAIN,
+    );
+    world.leftRailBody = leftKin.body;
+    world.leftRailCollider = leftKin.collider;
+
+    const rightKin = physics.createKinematicPlatform(
+      10.38,
+      sideWallCenterY,
+      SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      0.3,
+      sideWallH * 0.5,
+      0.85,
+      COLLISION_GROUP.TERRAIN,
+    );
+    world.rightRailBody = rightKin.body;
+    world.rightRailCollider = rightKin.collider;
+
+    // Headroom-aware Hero Spawn Selection (accounts for 1.6x Stickman height)
+    const computeHeadroom = (target: LivingIslandEntry): number => {
+      const targetTop = target.block.y + target.block.halfH;
+      const tMinX = target.block.x - target.block.halfW * 0.5;
+      const tMaxX = target.block.x + target.block.halfW * 0.5;
+      let minOverhead = Infinity;
+      for (const other of world.islands) {
+        if (other === target) continue;
+        const oTop = other.block.y + other.block.halfH;
+        if (oTop <= targetTop + 0.08) continue;
+        const oMinX = other.block.x - other.block.halfW;
+        const oMaxX = other.block.x + other.block.halfW;
+        if (oMaxX >= tMinX && oMinX <= tMaxX) {
+          minOverhead = Math.min(minOverhead, oTop - targetTop);
+        }
+      }
+      return minOverhead;
     };
-    world.platformBlocks.push(bottomBlock);
-    physics.addStaticPlatform(bottomBlock);
 
-    // Pick crisp elevated spawn point above the topmost wide block (or y = +0.55)
-    let bestSpawnBlock: PlatformBlock | null = null;
-    for (const b of world.platformBlocks) {
-      if (b.id === 'page-bottom-deck') continue;
-      if (b.halfW >= 1.4 && (!bestSpawnBlock || b.y > bestSpawnBlock.y)) {
-        bestSpawnBlock = b;
+    let bestSpawnIsland: LivingIslandEntry | null = null;
+    for (const isl of world.islands) {
+      if (isl.block.halfW < 0.75) continue;
+      if (isl.block.y <= -1.2 && isl.block.y >= -6.4 && computeHeadroom(isl) >= 1.55) {
+        if (!bestSpawnIsland || isl.block.y > bestSpawnIsland.block.y) {
+          bestSpawnIsland = isl;
+        }
       }
     }
-    if (bestSpawnBlock) {
+    if (!bestSpawnIsland) {
+      for (const isl of world.islands) {
+        if (isl.block.halfW < 0.8) continue;
+        if (computeHeadroom(isl) >= 1.55 && (!bestSpawnIsland || isl.block.y > bestSpawnIsland.block.y)) {
+          bestSpawnIsland = isl;
+        }
+      }
+    }
+    if (!bestSpawnIsland) {
+      for (const isl of world.islands) {
+        if (isl.block.halfW >= 0.8 && (!bestSpawnIsland || isl.block.y > bestSpawnIsland.block.y)) {
+          bestSpawnIsland = isl;
+        }
+      }
+    }
+
+    if (bestSpawnIsland) {
       world.spawnPoint.set(
-        THREE.MathUtils.clamp(bestSpawnBlock.x - bestSpawnBlock.halfW * 0.25, -7.5, 7.5),
-        bestSpawnBlock.y + bestSpawnBlock.halfH + 0.85,
+        THREE.MathUtils.clamp(bestSpawnIsland.block.x, -4.5, 4.5),
+        bestSpawnIsland.block.y + bestSpawnIsland.block.halfH + 0.75,
         SPATIAL_CONSTANTS.BAND_PLAY_Z,
       );
     } else {
-      world.spawnPoint.set(-4.5, bottomFloorY + 1.2, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+      world.spawnPoint.set(0, world.intactBottomY + 1.2, SPATIAL_CONSTANTS.BAND_PLAY_Z);
     }
 
-    // -----------------------------------------------------------------------
-    // Rideable Right-Edge Scrollbar Rail & Kinematic Elevator Carriage (X = +9.75m)
-    // -----------------------------------------------------------------------
-    const railH = Math.max(8, analyzed.pageHeightM + 1.0);
+    // Rideable Right-Edge Scrollbar Rail & Elevator Carriage
+    const railH = Math.max(8, world.expandedPageHeightM + 1.0);
     const railGeo = new THREE.BoxGeometry(0.22, railH, 0.32);
     const railMat = new THREE.MeshStandardMaterial({
       color: 0x1e293b,
@@ -628,7 +1322,7 @@ export class WebsiteWorld {
     const thumbMat = new THREE.MeshStandardMaterial({
       color: 0x06b6d4,
       emissive: 0x0891b2,
-      emissiveIntensity: 0.55,
+      emissiveIntensity: 0.65,
       roughness: 0.25,
       metalness: 0.75,
     });
@@ -636,8 +1330,13 @@ export class WebsiteWorld {
     world.materials.push(railMat, thumbMat);
 
     const railMesh = new THREE.Mesh(railGeo, railMat);
-    railMesh.position.set(world.scrollbarX + 0.42, -analyzed.pageHeightM * 0.5, SPATIAL_CONSTANTS.BAND_PLAY_Z);
+    railMesh.position.set(
+      world.scrollbarX + 0.42,
+      -world.expandedPageHeightM * 0.5,
+      SPATIAL_CONSTANTS.BAND_PLAY_Z,
+    );
     world.root.add(railMesh);
+    world.scrollbarRailMesh = railMesh;
 
     const thumbMesh = new THREE.Mesh(thumbGeo, thumbMat);
     world.scrollbarY = -1.2;
@@ -653,6 +1352,7 @@ export class WebsiteWorld {
       0.46,
       0.14,
       0.55,
+      COLLISION_GROUP.TERRAIN,
     );
     world.scrollbarBody = kinElevator.body;
     world.scrollbarCollider = kinElevator.collider;
@@ -660,24 +1360,163 @@ export class WebsiteWorld {
     return world;
   }
 
-  update(cameraY: number, stickmanPos: THREE.Vector3, fixedDt: number): number {
-    // 1. 1D Y-Interval Chunk Culling
-    const minVisY = cameraY - 15.0;
-    const maxVisY = cameraY + 15.0;
-    for (let i = 0; i < this.chunks.length; i++) {
-      const c = this.chunks[i];
-      c.group.visible = c.maxY >= minVisY && c.minY <= maxVisY;
+  update(
+    cameraY: number,
+    stickmanPos: THREE.Vector3,
+    fixedDt: number,
+    physics: PhysicsWorld,
+  ): number {
+    this.simTime += fixedDt;
+    if (this.worldPhase === 'intact') {
+      this.fractureCountdown = Math.max(0, this.fractureCountdown - fixedDt);
+    } else {
+      this.fractureElapsed += fixedDt;
+      if (this.worldPhase === 'fracturing' && this.fractureElapsed >= 0.75) {
+        this.worldPhase = 'broken_arena';
+      }
     }
 
-    // 2. Smooth Rideable Right-Edge Scrollbar Elevator
-    const minScrollY = -Math.max(4, this.pageHeightM - 0.6);
+    // 1. Cleanly dissolve Band -2 Backdrop into pure Dark Cosmic Space on fracture
+    if (this.worldPhase !== 'intact') {
+      this.backdropOpacity = dampScalar(this.backdropOpacity, 0, 8.0, fixedDt);
+    }
+    for (let i = 0; i < this.backdropMeshes.length; i++) {
+      const bm = this.backdropMeshes[i];
+      bm.mat.uniforms.uOpacity.value = this.backdropOpacity;
+      bm.mesh.visible = this.backdropOpacity > 0.015 && Math.abs(bm.y - cameraY) < 28.0;
+    }
+    if (this.outerFrameMesh && this.sideFrameMat && this.worldPhase !== 'intact') {
+      this.sideFrameMat.opacity = dampScalar(this.sideFrameMat.opacity, 0, 9.0, fixedDt);
+      if (this.sideFrameMat.opacity <= 0.015) {
+        this.outerFrameMesh.visible = false;
+      }
+    }
+
+    // 2. Animate Floating DOM Components & Sync Cyber-Vault Interior Colliders
+    for (let i = 0; i < this.islands.length; i++) {
+      const isl = this.islands[i];
+      let curX = isl.intactX;
+      let curY = isl.intactY;
+      let curZ = isl.intactZ;
+      let curPhysY = isl.intactPhysY;
+      let curRotZ = 0;
+
+      const occupied = this.activeVaultId === isl.id;
+      if (this.worldPhase !== 'intact') {
+        const localT = THREE.MathUtils.clamp(
+          (this.fractureElapsed - isl.staggerDelay) / 0.68,
+          0,
+          1,
+        );
+        const springP = easeOutBackClamped(localT);
+        const bobScale = occupied ? 0.12 : 1.0;
+        const bobAmp = isl.hoverAmp * bobScale * THREE.MathUtils.smoothstep(localT, 0.35, 1.0);
+        const bobY = Math.sin(this.fractureElapsed * isl.hoverFreq + isl.hoverPhase) * bobAmp;
+
+        curX = THREE.MathUtils.lerp(isl.intactX, isl.brokenX, springP);
+        curY = THREE.MathUtils.lerp(isl.intactY, isl.brokenY, springP) + bobY;
+        curZ = THREE.MathUtils.lerp(isl.intactZ, isl.brokenZ, THREE.MathUtils.clamp(localT, 0, 1));
+        curPhysY = THREE.MathUtils.lerp(isl.intactPhysY, isl.brokenPhysY, springP) + bobY;
+
+        curRotZ = occupied
+          ? 0
+          : isl.brokenRotZ * THREE.MathUtils.clamp(localT, 0, 1);
+      }
+
+      isl.curX = curX;
+      isl.curY = curY;
+      isl.curZ = curZ;
+
+      isl.group.position.set(curX, curY, curZ);
+      isl.group.rotation.set(0, 0, curRotZ);
+      isl.group.visible = Math.abs(curY - cameraY) < 26.0;
+
+      physics.updateKinematicPlatform(
+        isl.collider.handle,
+        curX,
+        curPhysY,
+        SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      );
+
+      // Sync attached Cyber-Vault animation, cutaway visibility, & Rapier interior colliders
+      if (isl.vault) {
+        const v = isl.vault;
+        if (v.isBreached) {
+          const showExteriorCutaway = !occupied;
+          if (isl.frontWingLeft) isl.frontWingLeft.visible = showExteriorCutaway;
+          if (isl.frontWingRight) isl.frontWingRight.visible = showExteriorCutaway;
+          v.frontDoorFrame.visible = showExteriorCutaway;
+
+          v.frontDoorFrame.rotation.z += fixedDt * 1.4;
+          v.exitBeaconMesh.rotation.z -= fixedDt * 2.2;
+          if (!v.isCoreDestroyed) {
+            v.coreMesh.rotation.y += fixedDt * 1.8;
+            v.coreMesh.rotation.x += fixedDt * 0.9;
+            v.coreGyroRing.rotation.x += fixedDt * 2.4;
+            v.coreGyroRing.rotation.y += fixedDt * 1.5;
+          }
+          for (const orb of v.orbs) {
+            if (!orb.collected) {
+              orb.mesh.rotation.y += fixedDt * 2.5;
+              orb.mesh.position.y = orb.localY + Math.sin(this.simTime * 3.0 + orb.phase) * 0.06;
+            }
+          }
+        }
+        for (const ic of v.interiorColliders) {
+          physics.updateKinematicPlatform(
+            ic.collider.handle,
+            curX + ic.localX,
+            curY + ic.localY,
+            SPATIAL_CONSTANTS.BAND_CHAMBER_CENTER_Z + ic.localZ,
+          );
+        }
+      }
+    }
+
+    // 3. Smoothly Widen Arena Bounds & Scrollbar Elevator
+    const arenaExpP =
+      this.worldPhase === 'intact'
+        ? 0
+        : THREE.MathUtils.smoothstep(this.fractureElapsed, 0, 0.72);
+    const railX = THREE.MathUtils.lerp(10.38, 14.8, arenaExpP);
+    this.scrollbarX = THREE.MathUtils.lerp(9.75, 14.1, arenaExpP);
+    const curBottomY = THREE.MathUtils.lerp(this.intactBottomY, this.expandedBottomY, arenaExpP);
+
+    if (this.bottomDeckMesh && this.bottomDeckCollider) {
+      this.bottomDeckMesh.position.y = curBottomY;
+      physics.updateKinematicPlatform(
+        this.bottomDeckCollider.handle,
+        0,
+        curBottomY,
+        SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      );
+    }
+    const railCenterY = -this.expandedPageHeightM * 0.5 + 3.0;
+    if (this.leftRailCollider) {
+      physics.updateKinematicPlatform(
+        this.leftRailCollider.handle,
+        -railX,
+        railCenterY,
+        SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      );
+    }
+    if (this.rightRailCollider) {
+      physics.updateKinematicPlatform(
+        this.rightRailCollider.handle,
+        railX,
+        railCenterY,
+        SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      );
+    }
+
+    const activeHeight = this.getActivePageHeightM();
+    const minScrollY = -Math.max(4, activeHeight - 0.6);
     const maxScrollY = -0.8;
     const nearElevator =
-      Math.abs(stickmanPos.x - this.scrollbarX) < 1.1 &&
-      Math.abs(stickmanPos.y - 0.68 - this.scrollbarY) < 0.75;
+      Math.abs(stickmanPos.x - this.scrollbarX) < 1.15 &&
+      Math.abs(stickmanPos.y - 0.72 - this.scrollbarY) < 0.85;
 
     if (nearElevator) {
-      // Gently shuttle down/up smoothly so player can ride between header & footer
       this.scrollbarY += this.scrollbarDir * 2.6 * fixedDt;
       if (this.scrollbarY <= minScrollY) {
         this.scrollbarY = minScrollY;
@@ -687,7 +1526,6 @@ export class WebsiteWorld {
         this.scrollbarDir = -1;
       }
     } else {
-      // Track player's vertical progress gently when off the rail
       const targetThumbY = THREE.MathUtils.clamp(stickmanPos.y - 0.6, minScrollY, maxScrollY);
       this.scrollbarY = THREE.MathUtils.lerp(
         this.scrollbarY,
@@ -696,27 +1534,50 @@ export class WebsiteWorld {
       );
     }
 
-    if (this.scrollbarThumbMesh && this.scrollbarBody) {
-      this.scrollbarThumbMesh.position.y = this.scrollbarY;
-      this.scrollbarBody.setNextKinematicTranslation({
-        x: this.scrollbarX,
-        y: this.scrollbarY,
-        z: SPATIAL_CONSTANTS.BAND_PLAY_Z,
-      });
+    if (this.scrollbarRailMesh) {
+      this.scrollbarRailMesh.position.x = this.scrollbarX + 0.42;
+    }
+    if (this.scrollbarThumbMesh && this.scrollbarCollider) {
+      this.scrollbarThumbMesh.position.set(
+        this.scrollbarX,
+        this.scrollbarY,
+        SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      );
+      physics.updateKinematicPlatform(
+        this.scrollbarCollider.handle,
+        this.scrollbarX,
+        this.scrollbarY,
+        SPATIAL_CONSTANTS.BAND_PLAY_Z,
+      );
     }
 
-    // Normalized page scroll progress [0..1]
-    const span = Math.max(1, this.pageHeightM);
+    const span = Math.max(1, activeHeight);
     return THREE.MathUtils.clamp(-stickmanPos.y / span, 0, 1);
   }
 
   dispose(physics: PhysicsWorld | null): void {
-    if (physics && this.scrollbarBody && this.scrollbarCollider) {
-      physics.removeDynamicOrKinematicBody(this.scrollbarBody, this.scrollbarCollider);
+    if (physics) {
+      for (const isl of this.islands) {
+        physics.removeDynamicOrKinematicBody(isl.body, isl.collider);
+        if (isl.vault) {
+          for (const ic of isl.vault.interiorColliders) {
+            physics.removeDynamicOrKinematicBody(ic.body, ic.collider);
+          }
+        }
+      }
+      if (this.bottomDeckBody && this.bottomDeckCollider) {
+        physics.removeDynamicOrKinematicBody(this.bottomDeckBody, this.bottomDeckCollider);
+      }
+      if (this.leftRailBody && this.leftRailCollider) {
+        physics.removeDynamicOrKinematicBody(this.leftRailBody, this.leftRailCollider);
+      }
+      if (this.rightRailBody && this.rightRailCollider) {
+        physics.removeDynamicOrKinematicBody(this.rightRailBody, this.rightRailCollider);
+      }
+      if (this.scrollbarBody && this.scrollbarCollider) {
+        physics.removeDynamicOrKinematicBody(this.scrollbarBody, this.scrollbarCollider);
+      }
     }
-    this.scrollbarBody = null;
-    this.scrollbarCollider = null;
-
     for (const g of this.geometries) g.dispose();
     for (const m of this.materials) m.dispose();
     for (const t of this.textures) t.dispose();

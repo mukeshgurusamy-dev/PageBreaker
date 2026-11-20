@@ -347,8 +347,8 @@ export class CalibrationArena {
     addCourseBlock('ledge-step-2', 0.95, 2.1, 2.3, 0.42, 1.05, true, cyanGrabMat);
     addCourseBlock('ledge-step-3', 3.45, 3.15, 2.1, 0.42, 1.05, true, cyanGrabMat);
 
-    // Low Crouch-Slide Tunnel Bar on Right Deck (0.94m clearance under bar)
-    addCourseBlock('low-slide-bar', 5.65, 0.52, 2.8, 0.82, 1.25, true, crimsonAccentMat);
+    // Low Crouch-Slide Tunnel Bar on Right Deck (1.17m clearance under bar for 1.6x hero)
+    addCourseBlock('low-slide-bar', 5.65, 0.74, 2.8, 0.82, 1.25, true, crimsonAccentMat);
 
     // -------------------------------------------------------------------------
     // World-Space Pointer Aim Reticle on Band 0
